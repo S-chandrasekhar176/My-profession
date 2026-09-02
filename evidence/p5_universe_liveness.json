@@ -1,0 +1,561 @@
+{
+  "generated_at": "2026-08-27T08:59:02.971017",
+  "canonical_universe_size": 50,
+  "live": [
+    "ADANIENT",
+    "ADANIPORTS",
+    "AMBUJACEM",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJFINSV",
+    "BAJFINANCE",
+    "BHARTIARTL",
+    "BPCL",
+    "BRITANNIA",
+    "CIPLA",
+    "COALINDIA",
+    "DABUR",
+    "DIVISLAB",
+    "DRREDDY",
+    "EICHERMOT",
+    "ETERNAL",
+    "GRASIM",
+    "HCLTECH",
+    "HDFCBANK",
+    "HEROMOTOCO",
+    "HINDALCO",
+    "HINDPETRO",
+    "HINDUNILVR",
+    "ICICIBANK",
+    "INDUSINDBK",
+    "INFY",
+    "ITC",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LT",
+    "M&M",
+    "MARUTI",
+    "NTPC",
+    "ONGC",
+    "PIDILITIND",
+    "POWERGRID",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SUNPHARMA",
+    "TATACONSUM",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TITAN",
+    "TMCV",
+    "TMPV",
+    "ULTRACEMCO",
+    "VEDL",
+    "WIPRO"
+  ],
+  "stale": [],
+  "empty": [
+    "M_M",
+    "TATAMOTORS",
+    "ZOMATO"
+  ],
+  "detail": {
+    "APOLLOHOSP": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 8803.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "AXISBANK": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1261.1,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ADANIENT": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 3153.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "AMBUJACEM": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 412.8,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ADANIPORTS": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1706.7,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ASIANPAINT": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 2638.5,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "BHARTIARTL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1887.2,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "BAJFINANCE": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1086.5,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "BRITANNIA": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 5282.5,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "CIPLA": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1415.6,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "BAJAJFINSV": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 2000.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "BPCL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 319.05,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "COALINDIA": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 399.85,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "DABUR": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 387.85,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "DIVISLAB": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 9054.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "GRASIM": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 3268.9,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "DRREDDY": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1177.6,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "EICHERMOT": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 8095.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HCLTECH": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1288.3,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HDFCBANK": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 714.4,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HEROMOTOCO": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 5571.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HINDALCO": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1022.15,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HINDPETRO": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 369.95,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "HINDUNILVR": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 2009.7,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ICICIBANK": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1449.4,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "INDUSINDBK": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1001.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "INFY": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1109.3,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ITC": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 268.85,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "JSWSTEEL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1332.7,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "KOTAKBANK": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 425.5,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "LT": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 4053.4,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "M&M": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 3355.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "MARUTI": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 13467.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "NTPC": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 328.95,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "PIDILITIND": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1659.9,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ONGC": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 232.68,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "POWERGRID": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 264.25,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "SBILIFE": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1781.9,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "RELIANCE": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1290.6,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "SBIN": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1045.5,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TATACONSUM": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1039.6,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "SUNPHARMA": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1912.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TATASTEEL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 187.1,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TCS": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 2255.2,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TECHM": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 1587.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ULTRACEMCO": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 11732.0,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TITAN": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 5167.8,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "VEDL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 280.95,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "WIPRO": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 177.57,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TMCV": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 473.75,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TMPV": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 316.2,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "ETERNAL": {
+      "status": "LIVE",
+      "daily_bars": 10,
+      "last_daily_ts": "2026-08-27T00:00:00+05:30",
+      "age_days": 0.6,
+      "last_close": 329.95,
+      "intraday_5m_bars": null,
+      "intraday_last_ts": null
+    },
+    "TATAMOTORS": {
+      "status": "EMPTY",
+      "daily_bars": 0,
+      "last_daily_ts": null,
+      "age_days": null,
+      "last_close": null,
+      "intraday_5m_bars": 0,
+      "intraday_last_ts": null
+    },
+    "M_M": {
+      "status": "EMPTY",
+      "daily_bars": 0,
+      "last_daily_ts": null,
+      "age_days": null,
+      "last_close": null,
+      "intraday_5m_bars": 0,
+      "intraday_last_ts": null
+    },
+    "ZOMATO": {
+      "status": "EMPTY",
+      "daily_bars": 0,
+      "last_daily_ts": null,
+      "age_days": null,
+      "last_close": null,
+      "intraday_5m_bars": 0,
+      "intraday_last_ts": null
+    }
+  }
+}

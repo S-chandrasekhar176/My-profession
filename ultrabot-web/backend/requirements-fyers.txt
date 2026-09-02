@@ -1,0 +1,19 @@
+# Fyers' official SDK declares a hard pin on aiohttp==3.9.x (and older
+# requests/websocket-client versions) that conflicts with this project's
+# aiohttp>=3.10.0 in requirements.txt.
+#
+# We only ever construct FyersModel with is_async=False, which never
+# imports/uses aiohttp at all (verified by inspecting the installed
+# package's source — aiohttp only appears in the is_async=True code path).
+# requests and websocket-client (its real, actually-used dependencies) are
+# already covered by requirements.txt.
+#
+# So: install this SEPARATELY, with --no-deps, so pip doesn't try to also
+# force-downgrade aiohttp/requests project-wide:
+#
+#   pip install --no-deps -r requirements-fyers.txt
+#
+# Run this AFTER `pip install -r requirements.txt`. See start.sh, which
+# does this automatically.
+
+fyers-apiv3==3.1.16

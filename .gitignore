@@ -1,0 +1,85 @@
+# dependencies
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+.pytest_cache/
+/harness_tests/
+harness_tests/
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# Python
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.db-journal
+*.sqlite3
+.encryption_key
+**/.encryption_key
+
+# local overrides & secrets
+*.local.yaml
+defaults.local.yaml
+
+# misc
+.DS_Store
+*.pem
+*.tar
+*.zip
+download/
+upload/
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+local-*
+.claude
+.z-ai-config
+*.log
+dev.log
+dev.out.log
+test
+prompt
+server.log
+tool-results/
+
+# Skills directory
+/skills/
+# Sandbox-only agent/runtime artifacts (not part of the product)
+/.agents/
+/.zscripts/
+/mini-services/
+/tests/
+/AGENTS.md
+/CLAUDE.md
