@@ -1,0 +1,3 @@
+# Extra runtime dependencies required by fyers_apiv3 (not declared in their package metadata)
+aws_lambda_powertools==1.25.5
+setuptools>=68.0.0

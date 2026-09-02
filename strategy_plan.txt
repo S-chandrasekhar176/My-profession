@@ -1,0 +1,904 @@
+Here are all 7 strategies with complete production-ready specifications. Read every word — these will be the backbone of the bot.
+
+---
+
+# 📋 Complete Strategy Specifications — Indian F&O Intraday Bot
+
+## Common Framework (Applies to All 7)
+
+| Parameter | Value |
+|-----------|-------|
+| **Timeframe** | 5-minute candles (primary), 15-min for trend context |
+| **Instruments** | Nifty F&O, BankNifty F&O, Sensex F&O, Reliance, HDFC Bank, ICICI Bank, SBI |
+| **Trading Hours** | 9:15 AM – 3:15 PM IST (entry window: 9:15 – 2:30 PM) |
+| **Max Open Positions** | 2 concurrent (across all strategies) |
+| **Max Loss/Day** | ₹10,000 or 2% of capital, whichever is lower |
+| **Circuit Breaker** | Halt all new entries after 3 consecutive losses in a day |
+| **Margin Buffer** | Use max 70% of available margin (30% buffer) |
+| **Slippage Buffer** | Add 0.05% to limit orders for execution certainty |
+
+### 4-Stage Profit Booking (Universal)
+| Stage | Trigger | Action | Trailing After? |
+|-------|---------|--------|-----------------|
+| **Stage 1: Breakeven Lock** | Price moves 0.5% in favor | Move SL to entry price + brokerage | No |
+| **Stage 2: First Book** | Price moves 1.0% in favor | Book 25% of position, SL to 0.7% profit | Yes — trail at 0.5% from peak |
+| **Stage 3: Main Book** | Price moves 2.0% in favor | Book another 30% of position, SL to 1.5% profit | Yes — trail at 0.8% from peak |
+| **Stage 4: Trail** | Price moves 3.0%+ in favor | Hold remaining 45%, trail SL at 1.0% from peak | Yes — trail at 1.0% from peak |
+
+### Position Sizing (Half-Kelly + Lot Rounding)
+```
+Position Size = Min(
+  (WinRate × AvgWin - (1 - WinRate) × AvgLoss) / AvgLoss × Capital × 0.5,   // Half-Kelly
+  MaxCapitalPerTrade                                                          // 2% of capital
+)
+Lot-Adjusted Quantity = Floor(Position Size / (Lot Size × Entry Price)) × Lot Size
+```
+
+---
+
+## Strategy 1: MB — Momentum Breakout
+
+### Core Concept
+Captures the start of a strong directional move when price breaks out of a defined range with momentum and volume confirmation. Works best when the market has been consolidating (coiling) and suddenly explodes in one direction — typically after news or institutional activity.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Yes (longs) | Strong trend follow-through |
+| Bear | ✅ Yes (shorts) | Strong trend follow-through |
+| Range | ⚠️ Cautious (reduced size) | Breakouts often fake |
+| HighVol | ❌ No | Too choppy, whipsaws |
+| Event | ⚠️ Only 15 min after event | Wait for initial volatility to settle |
+
+### Indicators Required
+- **20-period EMA** on 5-min candles — trend direction filter
+- **Bollinger Bands** (20, 2) — range definition
+- **Volume**: 20-period moving average of volume
+- **ATR** (14-period) — for dynamic stop loss
+
+### Entry Conditions — LONG
+```
+ALL of the following must be TRUE on the SAME 5-min candle:
+
+1. RANGE PREPARATION (checked over last 20 candles):
+   - Price has been inside Bollinger Bands for at least 10 of last 20 candles
+   - Bandwidth (Upper - Lower) / Middle < 0.02 (narrow bands = coiling)
+
+2. BREAKOUT CANDLE:
+   - Current candle CLOSES above Upper Bollinger Band
+   - Current candle body (|Close - Open|) > 0.3% of price
+   - Current candle is BULLISH (Close > Open)
+
+3. VOLUME CONFIRMATION:
+   - Current candle volume > 1.5 × 20-period average volume
+
+4. TREND ALIGNMENT:
+   - 5-min 20-EMA is rising (current EMA > EMA 5 candles ago)
+   - Price is above 15-min 20-EMA (higher timeframe confirmation)
+
+5. TIME FILTER:
+   - Entry only between 9:15 AM and 1:00 PM
+   - NOT within 30 min of any major economic event
+```
+
+### Entry Conditions — SHORT
+```
+Mirror of LONG conditions:
+
+1. Range preparation: Same (narrow Bollinger Bands, price inside for 10+ candles)
+2. Breakout candle: CLOSES below Lower Bollinger Band, body > 0.3%, BEARISH
+3. Volume: Current volume > 1.5 × 20-period average
+4. Trend: 5-min 20-EMA falling, price below 15-min 20-EMA
+5. Time: Same window
+```
+
+### Stop Loss
+```
+SL = Entry Price - (1.5 × ATR(14))
+
+If ATR is too small (< 0.2% of price), use:
+SL = Entry Price - 0.5% (minimum stop)
+
+For Nifty (~24000): ATR ≈ 40-80 pts → SL ≈ 60-120 pts
+For BankNifty (~52000): ATR ≈ 150-300 pts → SL ≈ 225-450 pts
+```
+
+### Profit Targets
+Uses the universal 4-stage system. Additionally:
+- **Partial target at 1.5 × ATR** from entry (aligns with Stage 2/3)
+- **Full exit by 3:00 PM** if no Stage 4 triggered (avoid overnight gap risk on options)
+
+### Exit Conditions (Beyond Profit Booking)
+- **Time stop**: Exit by 3:00 PM regardless of P&L
+- **Contrary signal**: If opposite MB signal fires, exit immediately
+- **Volume divergence**: If price makes new high but volume drops below 0.5× average, tighten trail
+
+### Failure Modes
+- **False breakout**: Price re-enters Bollinger Band within 3 candles → SL hit
+- **Low volume breakout**: If volume criteria not met, skip — these fail 60%+ of the time
+- **Late entry**: After 1 PM, momentum breakouts have less follow-through
+
+### Expected Performance (Backtest Targets)
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 48-52% | 45-50% |
+| Avg Win / Avg Loss | 1.8:1 | 1.5:1 |
+| Profit Factor | 1.3-1.5 | 1.1-1.3 |
+| Trades/Day | 0-2 | 0-1 |
+| Best Month | +8-12% | +5-8% |
+
+---
+
+## Strategy 2: PTC — Pullback Trend Continuation
+
+### Core Concept
+In an established intraday trend, waits for a pullback to a key moving average or support level, then enters when the trend resumes. This is a higher-probability strategy than pure breakout because you're entering "with the trend at a better price." Captures the 2nd or 3rd wave of a trend move.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Yes (longs only) | Pullbacks in uptrends have high success rate |
+| Bear | ✅ Yes (shorts only) | Pullbacks in downtrends |
+| Range | ❌ No | No trend to pull back to |
+| HighVol | ❌ No | Pullbacks become reversals |
+| Event | ❌ No | Trends break during events |
+
+### Indicators Required
+- **20-EMA** on 5-min — primary pullback target
+- **50-EMA** on 5-min — secondary pullback target (deeper pullback)
+- **15-min 20-EMA** — trend direction on higher timeframe
+- **Volume**: 20-period average
+- **RSI** (14, 5-min) — oversold/overbought in context of trend
+
+### Entry Conditions — LONG
+```
+ALL of the following must be TRUE:
+
+1. TREND ESTABLISHMENT (checked on 15-min chart):
+   - 15-min 20-EMA is rising for at least 6 consecutive 15-min candles
+   - Price has made at least one higher high and higher low in last 2 hours
+
+2. PULLBACK DETECTION (5-min chart):
+   - Price has pulled back and touches or comes within 0.2% of 5-min 20-EMA
+   - OR price has pulled back to 5-min 50-EMA (deeper pullback, higher reward)
+   - Pullback must have at least 3 red candles (not just a doji)
+
+3. RESUMPTION SIGNAL (on the candle AFTER pullback touches EMA):
+   - A bullish reversal candle forms near the EMA:
+     • Bullish engulfing, OR
+     • Hammer with lower wick > 1.5× body, OR
+     • Close > Open with Close > 50% of candle range
+   - RSI(14) was between 35-50 (oversold in uptrend context)
+   - Volume on reversal candle ≥ 0.8 × average (not required to be high)
+
+4. CONFIRMATION (next candle):
+   - Price moves above the HIGH of the reversal candle → ENTER on this break
+
+5. INVALIDATION:
+   - If price closes below 50-EMA before entry triggers → signal cancelled
+```
+
+### Entry Conditions — SHORT
+```
+Mirror logic:
+
+1. 15-min 20-EMA falling for 6+ candles, lower high + lower low pattern
+2. Price pulls back UP to 5-min 20-EMA or 50-EMA, 3+ green candles
+3. Bearish reversal candle near EMA (bearish engulfing / shooting star)
+4. RSI between 50-65 (overbought in downtrend context)
+5. Enter when price breaks below low of reversal candle
+```
+
+### Stop Loss
+```
+SL = Low of pullback candle - 0.15%
+
+For deeper pullbacks (to 50-EMA):
+SL = Swing low of pullback - 0.15%
+
+Minimum SL: 0.3% of entry price
+Maximum SL: 1.0% of entry price
+```
+
+### Profit Targets
+Universal 4-stage, plus:
+- **Primary target**: Previous swing high (in uptrend) or swing low (in downtrend)
+- **Extension target**: If pullback was shallow (20-EMA), target 2× the trend move before pullback
+- **If trend weakens** (15-min EMA flattens): Exit at Stage 2 regardless
+
+### Exit Conditions
+- **Trend break**: 15-min 20-EMA flattens or reverses → exit all
+- **Failed resumption**: If entry candle doesn't close above reversal high within 2 candles → exit at cost
+- **Time stop**: Exit by 2:30 PM (pullback trends don't sustain late in the day)
+
+### Failure Modes
+- **Trend reversal disguised as pullback**: The pullback keeps going → SL at 50-EMA protects
+- **Late pullback**: After 2 PM, even valid pullbacks often don't resume → time filter
+- **V-shape recovery without touching EMA**: Missed trade — that's fine, PTC needs the EMA touch
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 55-60% | 50-55% |
+| Avg Win / Avg Loss | 1.5:1 | 1.3:1 |
+| Profit Factor | 1.5-1.8 | 1.2-1.5 |
+| Trades/Day | 0-2 | 0-1 |
+| Best Month | +6-10% | +4-7% |
+
+---
+
+## Strategy 3: VC — Volume Climax
+
+### Core Concept
+Identifies when institutional money enters the market through abnormal volume spikes. These volume climaxes often mark the beginning of a sustained move. The key insight: **retail traders fade these moves, smart money rides them**. This strategy rides the smart money.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Yes (longs) | Volume climaxes in bull trends = strong buy signals |
+| Bear | ✅ Yes (shorts) | Distribution volume = strong sell signals |
+| Range | ✅ Yes (both) | Volume climax often breaks the range |
+| HighVol | ⚠️ Cautious | Hard to distinguish climax from normal volatile day |
+| Event | ⚠️ 10 min after | Event volume is expected, wait for real climax |
+
+### Indicators Required
+- **Volume**: Current candle volume vs 20-period average
+- **VWAP**: Volume-weighted average price (reset daily at 9:15 AM)
+- **OBV** (On-Balance Volume): Running cumulative
+- **5-min candle** structure (body, wicks)
+- **Tick volume delta** if available via Kite WebSocket
+
+### Entry Conditions — LONG
+```
+ALL of the following:
+
+1. VOLUME CLIMAX DETECTION:
+   - Current candle volume > 3.0 × 20-period average volume
+   - This is the HIGHEST volume candle in the last 20 candles
+   - Volume spike is SUDDEN (previous candle < 2× average)
+
+2. PRICE ACTION:
+   - Current candle is BULLISH (Close > Open)
+   - Candle body > 0.4% of price (not a doji with volume)
+   - Close is in the UPPER 40% of the candle's range
+   - Upper wick < 30% of total range (strong close, not rejection)
+
+3. VWAP CONTEXT:
+   - Price is AT or ABOVE VWAP (not below — below VWAP volume can be selling climax)
+   - If price was below VWAP but crosses above VWAP on this candle → EVEN STRONGER signal
+
+4. OBV CONFIRMATION:
+   - OBV makes a new 20-candle high (confirms accumulation)
+
+5. NO CONSECUTIVE CLIMAX:
+   - Previous candle was NOT also a volume climax (first climax only)
+   - If 2nd consecutive high-volume candle, skip (exhaustion possible)
+
+6. TIME FILTER:
+   - Best entries: 9:15-11:30 AM and 1:00-2:00 PM
+   - Avoid: 11:30-12:30 (lunch doldrums — volume is unreliable)
+   - Avoid: After 2:30 PM
+```
+
+### Entry Conditions — SHORT
+```
+1. Volume > 3× average, highest in 20 candles, sudden spike
+2. BEARISH candle, body > 0.4%, Close in LOWER 40% of range
+3. Price AT or BELOW VWAP (or crosses below)
+4. OBV makes new 20-candle LOW (distribution)
+5. Not consecutive climax
+6. Same time filters
+```
+
+### Stop Loss
+```
+SL = Entry Price - (1.0 × ATR(14))
+
+Minimum SL: 0.3%
+Maximum SL: 0.8%
+
+For Nifty: SL ≈ 40-80 pts
+For BankNifty: SL ≈ 150-250 pts
+```
+
+### Profit Targets
+Universal 4-stage, plus:
+- **VWAP target**: If entered above VWAP, the move typically extends 1.5-2.0% above VWAP
+- **Climax retest**: Often price pulls back to test the climax candle low → that becomes support → adds to position on retest
+- **Volume profile**: Exit when volume drops below 0.5× average on 3+ consecutive candles (climax is over)
+
+### Exit Conditions
+- **Volume decay**: If 3 consecutive candles have volume < 0.5× average → trail aggressively
+- **VWAP break**: If LONG and price closes below VWAP after being above → exit
+- **Climax candle low break**: If price closes below the low of the climax candle → exit immediately
+- **Opposite climax**: New volume climax in opposite direction → exit and potentially reverse
+
+### Failure Modes
+- **Exhaustion climax**: High volume but candle has huge wick (rejection) → this is selling, not buying. The "close in upper 40%" filter prevents this
+- **News-driven spike**: One-off spike that reverses in next candle → SL protects
+- **Multiple climaxes**: 3+ consecutive high volume candles = distribution → "no consecutive" filter + volume decay exit handles this
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 52-58% | 48-53% |
+| Avg Win / Avg Loss | 1.6:1 | 1.4:1 |
+| Profit Factor | 1.4-1.7 | 1.2-1.4 |
+| Trades/Day | 0-1 | 0-1 |
+| Best Month | +7-11% | +4-8% |
+
+---
+
+## Strategy 4: SIC — Signal Ignition Candle
+
+### Core Concept
+An "Ignition Candle" is an unusually strong, decisive candle that signals the start of a new directional move. Unlike MB (which needs range preparation), SIC can fire even without consolidation — it identifies candles that are statistically abnormal in their directional conviction. The strategy enters on the **breakout of this ignition candle** (not on the candle itself), providing a confirmed entry.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Yes (longs) | Ignition candles in trends are highly reliable |
+| Bear | ✅ Yes (shorts) | Same for shorts |
+| Range | ✅ Yes (both) | Ignition candle often breaks the range |
+| HighVol | ⚠️ One trade max | Too many false ignitions |
+| Event | ✅ Yes (5 min after) | Events create the strongest ignition candles |
+
+### Indicators Required
+- **Average Candle Body**: 20-period average of |Close - Open|
+- **Average Candle Range**: 20-period average of (High - Low)
+- **Volume**: 20-period average
+- **ATR** (14)
+
+### Ignition Candle Definition
+```
+A candle qualifies as an IGNITION CANDLE if:
+
+BODY RATIO:
+  |Close - Open| > 2.0 × 20-period average body size
+
+RANGE RATIO:
+  Body / (High - Low) > 0.7  (body is 70%+ of total range — very decisive)
+
+WICK CONSTRAINT:
+  Opposite wick < 20% of total range
+  (for bullish: lower wick < 20%; for bearish: upper wick < 20%)
+
+VOLUME (optional but strengthens):
+  Volume > 1.2 × 20-period average
+
+DIRECTION:
+  Bullish Ignition: Close > Open
+  Bearish Ignition: Close < Open
+```
+
+### Entry Conditions — LONG
+```
+1. IGNITION CANDLE FORMS:
+   - A bullish candle meets ALL ignition candle criteria above
+   - Mark this candle's HIGH as "ignition level"
+
+2. ENTRY TRIGGER (next 1-3 candles):
+   - Price breaks ABOVE the ignition candle's HIGH
+   - Enter at market or 0.05% above the high (limit order for better fill)
+   - MUST trigger within 3 candles of ignition (15 minutes max)
+   - If not triggered in 3 candles → signal expired
+
+3. FILTERS:
+   - Do NOT enter if current open position is in loss
+   - Do NOT enter if circuit breaker is active (3 consecutive losses)
+   - Skip if ignition candle was the FIRST candle of the day (9:15 AM — gap risk)
+
+4. TIME:
+   - Entry window: 9:20 AM – 2:00 PM
+```
+
+### Entry Conditions — SHORT
+```
+Mirror:
+1. Bearish ignition candle forms
+2. Price breaks BELOW ignition candle's LOW within 3 candles
+3. Same filters
+4. Same time window
+```
+
+### Stop Loss
+```
+SL = Ignition Candle's LOW - 0.1% (for longs)
+SL = Ignition Candle's HIGH + 0.1% (for shorts)
+
+Rationale: If price retraces below the ignition candle,
+the signal is invalidated.
+
+Minimum SL: 0.25%
+Maximum SL: 1.2%
+```
+
+### Profit Targets
+Universal 4-stage, plus:
+- **1× body target**: The ignition candle's body size, projected from entry (usually aligns with Stage 2)
+- **2× body target**: Double the body size (aligns with Stage 3/4)
+- **Measured move**: From the low of 5 candles before ignition to ignition candle high, projected upward
+
+### Exit Conditions
+- **Invalidation**: Close below ignition candle low (longs) → exit immediately
+- **Failed breakout**: Entry triggers but price fails to close above ignition high within 2 candles → exit at cost
+- **Slow burn**: If after 10 candles (50 min) the move is < 0.5%, exit — ignition is dying
+- **Opposite ignition**: New ignition candle in opposite direction → exit
+
+### Failure Modes
+- **Doji after ignition**: Price breaks ignition high but immediately reverses → SL at ignition low
+- **Multiple ignitions**: Rapid succession of ignition candles in both directions → only take first one in each direction per day
+- **End of day**: Ignition candle near 2:30 PM → skip (no time for follow-through)
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 50-55% | 47-52% |
+| Avg Win / Avg Loss | 1.9:1 | 1.6:1 |
+| Profit Factor | 1.4-1.6 | 1.2-1.4 |
+| Trades/Day | 0-2 | 0-1 |
+| Best Month | +8-13% | +5-9% |
+
+---
+
+## Strategy 5: MRF — Mean Reversion Force
+
+### Core Concept
+When price deviates significantly from its mean (VWAP or moving average), it tends to snap back. This strategy fades extreme moves, betting on reversion to the mean. It's the **counter-trend** strategy in the portfolio — provides diversification when trend strategies fail.
+
+**Critical rule**: Mean reversion ONLY works in ranging or moderately trending markets. In strong trends, it gets destroyed.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ⚠️ Longs only | Only buy the dip to mean, never short |
+| Bear | ⚠️ Shorts only | Only sell the rally to mean, never long |
+| Range | ✅ Yes (both) | Sweet spot — mean reversion thrives |
+| HighVol | ❌ No | Extremes get more extreme |
+| Event | ❌ No | Events cause directional moves, not mean reversion |
+
+### Indicators Required
+- **VWAP** (reset daily)
+- **Standard Deviation Bands**: VWAP ± 1.5σ, ± 2.0σ, ± 2.5σ (calculated intraday)
+- **RSI** (5-period, 5-min) — for oversold/overbought
+- **Volume**: 20-period average
+- **Bollinger Bands** (20, 2) as secondary confirmation
+
+### Standard Deviation Calculation (Intraday VWAP)
+```
+Since we only have intraday data for the current day:
+- Use rolling 20-candle standard deviation of price
+- 1.5σ band = VWAP ± (1.5 × 20-candle std dev)
+- 2.0σ band = VWAP ± (2.0 × 20-candle std dev)
+- 2.5σ band = VWAP ± (2.5 × 20-candle std dev)
+
+These bands widen/narrow naturally with volatility
+```
+
+### Entry Conditions — LONG (Buy the Extreme Dip)
+```
+ALL of the following:
+
+1. PRICE EXTREMITY:
+   - Price drops BELOW VWAP - 2.0σ
+   - This is an extreme deviation — statistically, reversion probability is high
+
+2. MEAN REVERSION SIGNAL (any ONE of these on current or next candle):
+   a) RSI(5) drops below 20, then crosses back above 20 → ENTER
+   b) Bullish engulfing candle forms at or below VWAP - 2.0σ → ENTER on close
+   c) Price touches VWAP - 2.5σ (even more extreme) → ENTER immediately
+   d) Doji + volume spike (1.5× avg) at or below 2.0σ → ENTER on next bullish close
+
+3. NO STRUCTURAL BREAK:
+   - Price has NOT broken below the day's low
+   - 15-min trend is NOT strongly bearish (15-min 20-EMA not falling > 0.5% in last hour)
+
+4. TIME FILTER:
+   - Best: 10:00 AM - 1:00 PM (enough data for VWAP to be meaningful)
+   - Avoid: First 30 min (VWAP unstable) and last hour (no reversion time)
+   - Hard stop: No entry after 2:00 PM
+
+5. REGIME CHECK:
+   - Market regime must be Range or Bull (never Bear for longs)
+   - If today's range (High - Low) < 1.0%, skip (too tight for reversion)
+```
+
+### Entry Conditions — SHORT (Sell the Extreme Rally)
+```
+Mirror:
+1. Price rises ABOVE VWAP + 2.0σ
+2. RSI(5) > 80 then crosses below, OR bearish engulfing at +2.0σ, OR touches +2.5σ
+3. No structural break above day's high
+4. 15-min trend not strongly bullish
+5. Same time filter
+6. Regime must be Range or Bear
+```
+
+### Stop Loss
+```
+For LONGS:
+  SL = VWAP - 2.5σ - 0.1%
+  (if price goes beyond 2.5σ, the deviation is TOO extreme — something is wrong)
+
+For SHORTS:
+  SL = VWAP + 2.5σ + 0.1%
+
+Maximum SL: 1.0% of entry price
+If calculated SL > 1.0%, use 1.0% instead and reduce position size proportionally
+```
+
+### Profit Targets
+- **Primary target**: VWAP (the mean) → this is where 70% of reversion trades reach
+- **Secondary target**: VWAP + 0.5σ (a little past the mean for extra profit)
+- **Aggressive target**: Opposite 1.5σ band (full reversion)
+
+4-Stage mapping:
+| Stage | MRF-Specific Trigger |
+|-------|---------------------|
+| Breakeven Lock | Price reaches VWAP - 1.0σ |
+| First Book (25%) | Price reaches VWAP → book here (high probability) |
+| Main Book (30%) | Price reaches VWAP + 0.5σ |
+| Trail (45%) | Hold with trail at VWAP level |
+
+### Exit Conditions
+- **Target hit**: At VWAP, book 25% immediately. This is the highest-probability exit.
+- **Trend acceleration**: If price continues past VWAP and starts trending away → let Stage 4 trail run
+- **Re-acceleration**: If after reverting to VWAP, price makes NEW extreme (breaks 2.5σ in same direction) → this is NOT mean reversion, it's a breakout. Exit MRF position immediately.
+- **Time stop**: If price hasn't reverted to VWAP within 45 minutes → exit at market. Mean reversion should be quick.
+
+### Failure Modes
+- **Trending day disguised as extreme**: Price hits 2σ but it's the start of a trend, not a fade → SL at 2.5σ limits damage
+- **Spiraling**: Price keeps making new extremes → each time SL gets hit, DO NOT re-enter in same direction
+- **VWAP instability**: First 30 min VWAP is unreliable → time filter prevents this
+- **Range too tight**: If day's total range < 1%, 2σ bands are too close → false signals → minimum range filter
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 60-65% | 58-63% |
+| Avg Win / Avg Loss | 0.9:1 | 0.85:1 |
+| Profit Factor | 1.2-1.4 | 1.1-1.3 |
+| Trades/Day | 0-2 | 0-2 |
+| Best Month | +4-7% | +3-6% |
+| Note | Lower R:R but high win rate compensates | — |
+
+---
+
+## Strategy 6: TRS — Trend Reversal System
+
+### Core Concept
+Identifies the exhaustion point of an existing intraday trend and enters early in the NEW direction. This is the **highest-risk, highest-reward** strategy in the portfolio. It catches trend changes before most participants recognize them.
+
+**⚠️ WARNING**: This strategy has the lowest win rate (~40-45%) but the highest reward-to-risk (2.5:1+). It MUST be used sparingly (max 1 trade/day) and with strict discipline.
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Shorts only | Catch the bull-to-bear reversal |
+| Bear | ✅ Longs only | Catch the bear-to-bull reversal |
+| Range | ❌ No | No trend to reverse |
+| HighVol | ⚠️ Max 1 trade | Volatility transitions create reversals |
+| Event | ✅ Yes | Events often cause reversals |
+
+### Indicators Required
+- **RSI** (14, 5-min) — divergence detection
+- **MACD** (12, 26, 9, 5-min) — momentum divergence
+- **Volume**: 20-period average + OBV
+- **20-EMA** and **50-EMA** on 5-min
+- **Key Levels**: Previous day high/low, intraday swing highs/lows
+- **Fibonacci Retracement** (38.2%, 50%, 61.8% of the day's range)
+
+### Reversal Detection Framework
+```
+A trend reversal requires MULTIPLE confirmation (not just one signal):
+
+STRONG REVERSAL (all 4 present):
+  1. RSI Divergence
+  2. MACD Divergence
+  3. Key Level Break
+  4. Volume Confirmation
+
+MODERATE REVERSAL (any 3 of 4):
+  - Enter with standard size
+
+WEAK REVERSAL (only 2 of 4):
+  - Do NOT enter (too risky)
+```
+
+### Entry Conditions — LONG (Reversing from Downtrend to Uptrend)
+```
+REVERSAL SETUP (downtrend must exist):
+  - 5-min 20-EMA has been falling for at least 10 consecutive candles (50 min)
+  - Price has made at least 2 lower highs and 2 lower lows in last 2 hours
+  - Price is at least 1.0% below the day's VWAP
+
+CONFIRMATION SIGNALS (need 3 of 4):
+
+1. RSI BULLISH DIVERGENCE:
+   - Price makes a LOWER low
+   - RSI makes a HIGHER low (at the same time)
+   - Divergence must form over 5-15 candles (not too stretched)
+
+2. MACD BULLISH DIVERGENCE:
+   - Price makes lower low
+   - MACD histogram makes higher low (or MACD line crosses above signal line)
+   - Must occur within last 10 candles
+
+3. KEY LEVEL BREAK:
+   - Price breaks ABOVE the most recent swing high (on 5-min)
+   - OR price breaks above 5-min 20-EMA
+   - AND this break happens with a bullish candle (Close > Open)
+
+4. VOLUME CONFIRMATION:
+   - Breakout candle (signal #3) has volume > 1.5× average
+   - OR OBV has been rising while price was falling (accumulation)
+   - OR volume was declining during the downtrend (exhaustion)
+
+ENTRY TRIGGER:
+  - When the 3rd confirmation triggers → ENTER on the close of that candle
+  - OR place a limit order 0.05% above the breakout candle's close
+
+ADDITIONAL FILTERS:
+  - Do NOT enter if this is the 3rd+ reversal attempt today (choppy day)
+  - Fibonacci context: If reversal happens near 61.8% retracement of the day's range → STRONGER signal
+  - Time: Best between 11:00 AM - 2:00 PM (midday reversals are most reliable)
+```
+
+### Entry Conditions — SHORT (Reversing from Uptrend to Downtrend)
+```
+Mirror logic:
+1. Uptrend established: 20-EMA rising 10+ candles, 2+ higher highs/lows
+2. RSI bearish divergence (price higher high, RSI lower high)
+3. MACD bearish divergence (price higher high, MACD lower high)
+4. Key level break below swing low or 20-EMA with bearish candle
+5. Volume: Breakout volume > 1.5× average, or OBV falling while price rising
+6. Same additional filters
+```
+
+### Stop Loss
+```
+SL = Swing Low of the reversal (for longs) - 0.1%
+   = Swing High of the reversal (for shorts) + 0.1%
+
+Where "Swing Low/High" = the extreme point BEFORE the reversal breakout
+
+Minimum SL: 0.4%
+Maximum SL: 1.5%
+
+Position size for TRS is HALF of normal (due to lower win rate):
+  TRS Quantity = 0.5 × Normal Half-Kelly Quantity
+```
+
+### Profit Targets
+This is where TRS shines — when it works, the move is large:
+- **Target 1**: Reclaim VWAP (usually 1-2% move) → Stage 2 trigger
+- **Target 2**: Previous day's high/low → Stage 3 trigger
+- **Target 3**: Full trend reversal → 2-3% move → Stage 4 trail
+
+### Exit Conditions
+- **Failed reversal**: If price re-breaks the swing low (longs) within 5 candles → exit immediately. The reversal has failed.
+- **Partial reversal only**: If price reaches VWAP but can't break above → book 50% and trail the rest
+- **Re-reversal**: If after entering, a NEW reversal signal fires in the ORIGINAL direction → this is a whipsaw. Exit TRS at breakeven.
+- **Time stop**: If reversal hasn't produced 0.5% move in 30 minutes → exit. Real reversals move fast.
+
+### Failure Modes
+- **Whipsaw**: Most common failure. Price shows divergence, breaks level, then reverses again → SL hit. This is why position size is halved.
+- **Late reversal**: Catching the END of a move that's already 80% done → limited profit, SL risk same
+- **Multiple divergences**: In choppy markets, RSI/MACD divergences appear constantly → "max 2 reversal attempts per day" rule
+- **Event reversal**: Event causes sharp move, then reversal. But the event move resumes → use only 1 TRS trade around events
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 40-45% | 38-43% |
+| Avg Win / Avg Loss | 2.5:1 | 2.2:1 |
+| Profit Factor | 1.2-1.4 | 1.0-1.2 |
+| Trades/Day | 0-1 | 0-1 |
+| Best Month | +5-9% | +3-7% |
+| Max Consecutive Losses | 5-7 | 5-7 |
+
+---
+
+## Strategy 7: ORB — Opening Range Breakout
+
+### Core Concept
+The most battle-tested intraday strategy in Indian markets. The first 15/30 minutes of trading establish a range. Breaking out of this range with volume indicates the day's likely direction. This strategy has the highest win rate among all 7 because it has the most data supporting it (decades of backtesting in Nifty/BankNifty).
+
+### Best Market Regime
+| Regime | Use? | Reason |
+|--------|------|--------|
+| Bull | ✅ Yes (longs) | Opening range breakouts follow the trend |
+| Bear | ✅ Yes (shorts) | Same |
+| Range | ✅ Yes (both) | Range days often have clear ORB signals |
+| HighVol | ⚠️ Wider range | Use 30-min range instead of 15-min |
+| Event | ❌ No | Event days have gaps that invalidate ORB |
+
+### Indicators Required
+- **Opening Range High/Low** (15-min or 30-min)
+- **Volume**: Compare first 15-min volume to 20-day average first-15-min volume
+- **Previous Day High/Low** (PDH/PDL) — as additional resistance/support
+- **ATR** (14 from previous day) — for range quality check
+
+### Opening Range Definition
+```
+15-MINUTE RANGE (default):
+  Range High = Highest price between 9:15 AM and 9:30 AM
+  Range Low  = Lowest price between 9:15 AM and 9:30 AM
+  Range Width = Range High - Range Low
+
+30-MINUTE RANGE (for high-vol days):
+  Range High = Highest price between 9:15 AM and 9:45 AM
+  Range Low  = Lowest price between 9:15 AM and 9:45 AM
+
+VOLATILITY-BASED SELECTION:
+  If Previous Day ATR / Previous Close < 0.5%: Use 15-min range (low vol = tighter range better)
+  If Previous Day ATR / Previous Close > 1.0%: Use 30-min range (high vol = need wider range)
+  Otherwise: Use 15-min range (default)
+```
+
+### Entry Conditions — LONG (Breakout Above Range)
+```
+ALL of the following:
+
+1. OPENING RANGE ESTABLISHED:
+   - 9:30 AM candle has closed (15-min range is set)
+   - Range Width > 0.3% of price (too narrow = false breakout risk)
+
+2. BREAKOUT CANDLE:
+   - A 5-min candle CLOSES above the Opening Range High
+   - Candle must be BULLISH (Close > Open)
+   - Candle body > 50% of candle range (decisive, not wicky)
+
+3. VOLUME CONFIRMATION:
+   - Breakout candle volume > 1.0 × 20-day average volume for that time of day
+   - OR total volume from 9:15-9:35 AM > 0.8 × 20-day average for same period
+
+4. RANGE QUALITY:
+   - Opening range had at least 3 candles (not just 1 big candle)
+   - Range was not a gap open (9:15 open within 0.3% of previous close)
+   - If gap open: Only trade ORB if price fills the gap FIRST, then breaks out
+
+5. NO FALSE BREAKOUT:
+   - This is the FIRST breakout of the range (no prior failed breakouts)
+   - If price broke above range high earlier but fell back → this is a FALSE breakout
+     → Do NOT enter on the re-breakout (failure rate doubles)
+
+6. TIME:
+   - Breakout must occur between 9:35 AM and 10:30 AM
+   - After 10:30 AM → ORB signal is stale, skip
+```
+
+### Entry Conditions — SHORT (Breakout Below Range)
+```
+Mirror:
+1. Range established, width > 0.3%
+2. 5-min candle CLOSES below Range Low, bearish, body > 50%
+3. Volume confirmation
+4. Range quality checks
+5. No prior false breakdown
+6. Same time window
+```
+
+### Stop Loss
+```
+For LONGS:
+  Primary SL = Opening Range Low - 0.1%
+  (worst case: if it fails, it should not break the entire range)
+
+  Aggressive SL = 50% of Range Width below entry
+  (if range was 40 pts on Nifty, SL = 20 pts below entry — tighter but higher risk)
+
+For SHORTS:
+  Primary SL = Opening Range High + 0.1%
+  Aggressive SL = 50% of Range Width above entry
+
+DEFAULT: Use Primary SL (full range width)
+If Range Width > 1.5% of price: Use Aggressive SL (too wide otherwise)
+
+Minimum SL: 0.25%
+Maximum SL: 1.0%
+```
+
+### Profit Targets
+ORB has well-documented target profiles in Indian markets:
+
+**Measured Move Target**:
+```
+Target = Range High + Range Width (for longs)
+Target = Range Low - Range Width (for shorts)
+
+Example: Nifty range = 24030-24070 (40 pts)
+  Long entry: 24070
+  Target 1: 24070 + 40 = 24110 (1× range)  → Stage 2
+  Target 2: 24070 + 80 = 24150 (2× range)  → Stage 3
+  Target 3: 24070 + 120 = 24190 (3× range) → Stage 4
+```
+
+4-Stage mapping:
+| Stage | ORB-Specific Trigger |
+|-------|---------------------|
+| Breakeven Lock | Price moves 1× range width from entry |
+| First Book (25%) | Price moves 1.5× range width |
+| Main Book (30%) | Price moves 2× range width |
+| Trail (45%) | Price moves 2.5× range width, trail at 1.5× range from peak |
+
+### Exit Conditions
+- **Failed breakout**: Price breaks range but closes back inside within 3 candles → exit at Primary SL
+- **Range retest**: If price breaks out, moves 0.5× range, then retests the range high/low → if it holds, this is VERY bullish/bearish → add to position (Stage 4)
+- **Lunch reversal**: Many ORB moves reverse between 12:00-1:30 PM. If still in trade at 12:00, move SL to breakeven and set target for 1× range only
+- **End of day**: Close all ORB positions by 3:00 PM. Never hold ORB overnight (options decay)
+- **Opposite ORB**: If long ORB fires and then short ORB fires (range breakdown after range breakout) → this is an expansion day. Exit long, DO NOT enter short (both signals invalidated)
+
+### Failure Modes
+- **False breakout**: Price pokes above range high by 2-3 pts then reverses → candle close filter prevents most of these
+- **Wide range day**: If opening range is > 1.5% of price, the breakout has no room → range quality check prevents
+- **Gap day**: Gap up/down at 9:15 means the opening range is already outside yesterday's range → gap filter handles
+- **Post-10:30 breakout**: Late breakouts have 30% lower success rate → time filter prevents
+- **Doji opening range**: If opening range has no clear high/low (all dojis) → skip the day
+
+### Expected Performance
+| Metric | Long | Short |
+|--------|------|-------|
+| Win Rate | 55-62% | 52-58% |
+| Avg Win / Avg Loss | 1.7:1 | 1.5:1 |
+| Profit Factor | 1.6-1.9 | 1.3-1.6 |
+| Trades/Day | 0-1 | 0-1 |
+| Best Month | +8-14% | +5-10% |
+| Most Reliable Strategy | ✅ | ✅ |
+
+---
+
+## 📊 Strategy Comparison Matrix
+
+| Strategy | Win Rate | R:R | Profit Factor | Trades/Day | Risk Level | Best Regime |
+|----------|----------|-----|---------------|------------|------------|-------------|
+| **ORB** | 55-62% | 1.7:1 | 1.6-1.9 | 0-1 | 🟢 Low | All except Event |
+| **PTC** | 55-60% | 1.5:1 | 1.5-1.8 | 0-2 | 🟢 Low | Bull/Bear |
+| **VC** | 52-58% | 1.6:1 | 1.4-1.7 | 0-1 | 🟡 Medium | All except HighVol |
+| **SIC** | 50-55% | 1.9:1 | 1.4-1.6 | 0-2 | 🟡 Medium | All |
+| **MB** | 48-52% | 1.8:1 | 1.3-1.5 | 0-2 | 🟡 Medium | Bull/Bear |
+| **MRF** | 60-65% | 0.9:1 | 1.2-1.4 | 0-2 | 🟡 Medium | Range |
+| **TRS** | 40-45% | 2.5:1 | 1.2-1.4 | 0-1 | 🔴 High | Bull→Bear transitions |
+
+## 🧠 Regime-Adaptive Ensemble Logic
+
+```
+Each trading day:
+
+1. AT 9:00 AM (before market open):
+   - Run regime detection on previous day's data + pre-market indicators
+   - Classify: Bull / Bear / Range / HighVol / Event
+   - Calculate regime confidence score (0-100)
+
+2. ACTIVATE STRATEGIES based on regime:
+
+   BULL:
+     ORB (long), PTC (long), VC (long), SIC (long), MB (long), MRF (long dips only)
+     Weight: ORB=1.3, PTC=1.2, SIC=1.1, MB=1.0, VC=1.0, MRF=0.8, TRS=0 (off)
+
+   BEAR:
+     ORB (short), PTC (short), VC (short), SIC (short), MB (short), MRF (short rallies only)
+     Weight: ORB=1.2, PTC=1.1, SIC=1.0, MB=1.0, VC=0.9, MRF=0.7, TRS=0 (off)
+
+   RANGE:
+     ORB (both), VC (both), SIC (both), MRF (both)
+     Weight: ORB=1.2, MRF=1.2, VC=1.1, SIC=1.0, PTC=0 (off), MB=0 (off), TRS=0 (off)
+
+   HIGHVOL:
+     ORB (30-min range, both), SIC (1 trade max)
+     Weight: ORB=1.0, SIC=0.5, everything else=0 (off)
+
+   EVENT:
+     SIC (5 min after), TRS (1 trade)
+     Weight: SIC=1.0, TRS=0.8, everything else=0 (off)
+
+3. SIGNAL CONFLICT RESOLUTION:
+   - If 2+ strategies fire in SAME direction → INCREASE position by 25%
+   - If strategies fire in OPPOSITE directions → take HIGHER confidence signal only
+   - If 3+ strategies fire in same direction → this is HIGH CONFIDENCE → increase by 50% but keep within 2% cap
+
+4. DAILY LOSS CIRCUIT BREAKER:
+   - After 3 consecutive losses: Reduce all position sizes by 50%
+   - After daily loss > ₹10,000: HALT all new entries for the day
+   - After daily loss > ₹15,000: CLOSE all open positions immediately
+```

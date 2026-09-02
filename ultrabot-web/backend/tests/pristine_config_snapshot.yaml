@@ -1,0 +1,317 @@
+app:
+  name: UltraBot Web
+  version: 1.0.0
+  secret_key: change-me-in-production
+  host: 127.0.0.1
+  port: 8000
+auth:
+  username: admin
+  password_hash: $2b$12$Wb5rmUCZlzToN7WVIzbJX.409papQngxfB/vb7LjQdUumBzErPbhG
+engine:
+  scan_interval_seconds: 180
+  # v0.4.2 (P1): scan cadence used when the active candle feed is realtime
+  # (Fyers 1m). Falls back to 180s automatically on Yahoo failover.
+  scan_interval_realtime_seconds: 60
+  max_scan_retries: 3
+  auto_squareoff_time: '15:15'
+  auto_start: true
+market:
+  nse_open: 09:15
+  nse_close: '15:30'
+  pre_market_start: 09:00
+  post_market_end: '16:00'
+  auto_squareoff_time: '15:15'
+  timezone: Asia/Kolkata
+capital:
+  virtual_capital: 500000
+  max_capital_usage_pct: 90
+  min_position_size: 5000
+  # v0.4.2: restored to the pristine 25% — a risk-limits save had leaked a
+  # 10% cross-write into this capital-owned setting (the config-hygiene
+  # incident; the risk route is now section-ownership-fixed). This section is
+  # owned exclusively by the Capital tab / PUT /api/settings.
+  max_per_position_pct: 25.0
+  # v0.4.2: ON per user's explicit request (P0.5) — each trading day starts
+  # from the previous day's ending capital; falls back to virtual_capital.
+  carry_forward_capital: true
+risk:
+  max_open_positions: 3
+  max_per_sector: 2
+  max_sector_concentration_pct: 40.0
+  max_daily_trades: 10
+  max_daily_loss_pct: 3
+  max_consecutive_losses: 5
+  consec_loss_cooloff_minutes: 30
+  # v0.4.6: restored to the pristine v0.4.1 value 20 — a test payload
+  # (vix_high_threshold: 22.0) polluted this key during the v0.4.2 session's
+  # dual-singleton debugging, silently loosening G7's VIX block from 20 to 22.
+  vix_threshold: 20
+  # Hard block level — extreme market panic (G7); must stay > vix_threshold
+  vix_extreme_threshold: 35.0
+  vix_staleness_warning_seconds: 360
+  vix_staleness_critical_seconds: 540
+  vix_stale_floor: 22.0
+  stale_candle_max_age_minutes: 30
+  new_trade_window_start: 09:30
+  new_trade_window_end: '15:15'
+  auto_squareoff_time: '15:15'
+  price_mismatch_threshold_pct: 0.5
+  min_signal_confidence: 0.6
+  max_drawdown_pct: 5
+  opportunity_ttl_seconds: 300
+  strategy_ttl_seconds:
+    ORB: 180
+    MB: 180
+    TRS: 180
+    MRF: 360
+    PTC: 360
+    SIC: 360
+    VC: 420
+  nifty_sanity_min: 10000
+  nifty_sanity_max: 40000
+  banknifty_sanity_min: 25000
+  banknifty_sanity_max: 100000
+  max_fee_pct_of_risk: 30.0
+  # v0.4.6: restored to the pristine v0.4.1 value 1.0 — a test payload
+  # (hard_risk_pct: 1.5) leaked into the shipped file during the v0.4.2
+  # session, silently loosening the hard per-trade risk floor by 50% (user
+  # caught it: entry 100 / SL 50 / ₹5L capital sized 150 shares = ₹7,500
+  # risk where the documented 1% budget allows 100 = ₹5,000).
+  # Risk budget used by G17 to ESTIMATE quantity before the sizer runs
+  # (mirrors position_sizing.hard_risk_pct; the gate runs pre-sizing).
+  hard_risk_pct: 1.0
+  per_strategy_daily_loss_pct: 1.0
+  per_strategy_daily_loss_overrides:
+    MRF: 0.75
+    TRS: 0.5
+  per_strategy_consec_loss_limit: 2
+  per_strategy_consec_loss_cooldown_minutes: 240
+  time_stop_minutes:
+    default: 90
+    PTC: 75
+    MB: 45
+    MRF: 60
+    VC: 60
+    SIC: 30
+    ORB: 90
+    TRS: 90
+  fail_fast:
+    window_minutes: 15
+    atr_mult:
+      MB: 0.75
+      VC: 0.75
+  shadow_signal_max_age_minutes: 90
+# v0.4.2 (P2): all 14 dormant strategies + TRS shadow-tracked every scan —
+# signals recorded, never traded; feeds GET /api/strategies/verdicts.
+strategy_shadow_mode:
+- TRS
+- AdaptiveSupertrend
+- Breakout
+- GapFill
+- MeanReversion
+- Momentum
+- MultiTimeframe
+- NewsMomentum
+- ORBVolume
+- ORB_Classic
+- RSIDivergence
+- SectorRotation
+- Supertrend
+- TrendExhaustion
+- VWAPReversion
+# v0.4.2 (P2): realistic paper fills — ~5bps half-spread + size impact.
+paper_broker:
+  slippage:
+    enabled: true
+    base_bps: 5.0
+    impact_bps_per_crore: 2.0
+    max_bps: 25.0
+partial_booking:
+  enabled: true
+  brokerage_buffer_pct: 0.05
+  stage1_trigger_pct: 0.5
+  stage1_book_pct: 0.0
+  stage2_trigger_pct: 1.0
+  stage2_book_pct: 25.0
+  stage2_trail_pct: 0.5
+  stage3_trigger_pct: 2.0
+  stage3_book_pct: 30.0
+  stage3_trail_pct: 0.8
+  stage4_trigger_pct: 3.0
+  stage4_book_pct: 45.0
+  stage4_trail_pct: 1.0
+  trailing_sl_method: step
+  trailing_step_pct: 0.5
+position_sizing:
+  method: dynamic_kelly
+  kelly_min_fraction: 0.02
+  kelly_max_fraction: 0.08
+  # v0.4.6: restored to the pristine v0.4.1 value 1.0 (was polluted to 1.5 —
+  # see risk.hard_risk_pct note). Kept in lockstep with risk.hard_risk_pct
+  # by Settings._enforce_hard_risk_sync(); risk is the canonical section.
+  hard_risk_pct: 1.0
+  confidence_tiers:
+    high:
+      min: 0.8
+      multiplier: 1.0
+    medium:
+      min: 0.6
+      multiplier: 0.8
+    low:
+      min: 0.4
+      multiplier: 0.5
+  volatility_tiers:
+    calm:
+      max_vix: 14
+      multiplier: 1.0
+    normal:
+      max_vix: 18
+      multiplier: 0.85
+    nervous:
+      max_vix: 22
+      multiplier: 0.65
+    fearful:
+      max_vix: 999
+      multiplier: 0.4
+  drawdown_tiers:
+    profit:
+      min_pct: 0
+      multiplier: 1.0
+    small_loss:
+      min_pct: -1
+      multiplier: 0.9
+    mod_loss:
+      min_pct: -2
+      multiplier: 0.7
+    big_loss:
+      min_pct: -3
+      multiplier: 0.4
+fees:
+  brokerage_per_order: 20
+  stt_intraday_sell_pct: 0.00025
+  stt_delivery_pct: 0.001
+  exchange_txn_pct: 3.45e-05
+  gst_pct: 0.18
+  sebi_fee_pct: 1.0e-06
+  stamp_duty_pct: 3.0e-05
+notifications:
+  telegram_enabled: true
+  telegram_bot_token: 8864941949:AAE_p27BIDwPAyQTGBreaepdDURk-v06ClU
+  telegram_chat_id: '5284252833'
+  morning_briefing_time: 08:30
+  eod_report_time: '15:45'
+  alert_trade_executed: true
+  alert_partial_booking: true
+  alert_stop_loss: true
+  alert_target_hit: true
+  alert_risk_warning: true
+  alert_engine_status: true
+  alert_error: true
+  alert_eod_report: true
+  # v0.4.8 additions (HF-10 + P1 + P2)
+  alert_feed_health: true
+  alert_opportunities: true
+  eod_pdf_enabled: true
+  eod_pdf_time: '15:35'
+brokers:
+  angel_one:
+    enabled: false
+    api_key: ''
+    client_code: ''
+    pin: ''
+    jwt_token: ''
+    refresh_token: ''
+    feed_token: ''
+  shoonya:
+    enabled: false
+    user_id: ''
+    password: ''
+    vendor_code: ''
+    app_key: ''
+# v0.4.2 (P2): top-20 watchlist (was 10) + midday 12:30 re-rank.
+watchlist:
+  fno_universe_file: null
+  final_top_n: 20
+  max_watchlist_size: 40
+  news_scan_interval_minutes: 15
+  technical_scan_interval_minutes: 5
+  kronos_scan_interval_minutes: 5
+regime:
+  classification_interval_minutes: 15
+  bull_nifty_day_change_pct: 0.3
+  bull_nifty_5day_change_pct: 1.0
+  bull_ad_ratio: 1.5
+  bear_nifty_day_change_pct: -0.3
+  bear_ad_ratio: 0.67
+  high_vix_threshold: 22
+strategy_activation:
+  Bull:
+    active:
+    - ORB
+    - PTC
+    - VC
+    - SIC
+    - MB
+    - MRF
+    - TRS
+    weights:
+      ORB: 1.3
+      PTC: 1.2
+      SIC: 1.1
+      MB: 1.0
+      VC: 1.0
+      MRF: 0.8
+      TRS: 0.0
+  Bear:
+    active:
+    - ORB
+    - PTC
+    - VC
+    - SIC
+    - MB
+    - MRF
+    - TRS
+    weights:
+      ORB: 1.2
+      PTC: 1.1
+      SIC: 1.0
+      MB: 1.0
+      VC: 0.9
+      MRF: 0.7
+      TRS: 0.0
+  Sideways:
+    active:
+    - ORB
+    - MRF
+    - VC
+    - SIC
+    paused:
+    - PTC
+    - MB
+    - TRS
+    weights:
+      ORB: 1.2
+      MRF: 1.2
+      VC: 1.1
+      SIC: 1.0
+      PTC: 0.0
+      MB: 0.0
+      TRS: 0.0
+  Volatile:
+    active:
+    - ORB
+    - SIC
+    - TRS
+    paused:
+    - MB
+    - PTC
+    - VC
+    - MRF
+    weights:
+      ORB: 1.0
+      SIC: 0.5
+      TRS: 0.5
+      MB: 0.0
+      PTC: 0.0
+      VC: 0.0
+      MRF: 0.0
