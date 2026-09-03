@@ -72,6 +72,17 @@ risk:
   banknifty_sanity_min: 25000
   banknifty_sanity_max: 100000
   max_fee_pct_of_risk: 30.0
+  # v0.4.9 wave-4: G19 fee-aware minimum-move gate. Complements G17
+  # (cost vs RISK) by checking cost vs REWARD: a signal whose gross target
+  # move is below min_move_fee_multiple × round-trip costs needs an
+  # outsized move just to net pocket change after fees.
+  #   g19_mode: log_only (DEFAULT — never blocks; [G19 SHADOW] verdicts in
+  #             the gate log build the enforcement evidence base),
+  #             enforce (blocks below-multiple signals), off (skipped).
+  # Flip to enforce ONLY after reviewing shadow verdicts against real
+  # outcomes across enough live days.
+  g19_mode: log_only
+  min_move_fee_multiple: 2.0
   # v0.4.6: restored to the pristine v0.4.1 value 1.0 — a test payload
   # (hard_risk_pct: 1.5) leaked into the shipped file during the v0.4.2
   # session, silently loosening the hard per-trade risk floor by 50% (user

@@ -51,6 +51,49 @@ IST = ZoneInfo("Asia/Kolkata")
 # suite never caught it. Every direction branch must go through the helper.
 
 
+def _estimate_entry_round_trip_fees(
+    filled_price: float,
+    quantity: int,
+    fees_config: Optional[dict] = None,
+) -> float:
+    """Entry-time fee estimate for a just-filled trade — FULL round trip.
+
+    v0.4.9 wave-4 fee-truth fix: the previous inline formula charged ONE
+    ₹20 brokerage leg and ONE leg of turnover fees (invested_amount on the
+    buy side only, intraday STT wrongly applied to the buy leg, and GST
+    levied on the entire fee stack including STT/stamp). Displayed
+    "Estimated Fees" were therefore ~₹38-40 while the true round trip ran
+    ~₹61-62 — live evidence: ASIANPAINT (2026-08-28) recorded ₹38.08 entry
+    estimate vs ₹61.33 true round trip; the 2026-09-03 NTPC/DELHIVERY
+    trades displayed ₹38.4x vs ₹61.61/₹61.74 actual.
+
+    This helper delegates to the canonical NSEFeeCalculator — the exact
+    model the close path, G17/G19 and the EOD reconciliation use —
+    approximating the exit leg at the fill price until the real exit fill
+    is known. The close path still overwrites ``fees`` with the exact
+    fill-based round trip, so the estimate only has to be honest, not
+    clairvoyant.
+    """
+    fees_cfg = fees_config or {}
+    brokerage = float(fees_cfg.get("brokerage_per_order", 20.0))
+    if quantity is None or int(quantity) <= 0:
+        return 0.0
+    try:
+        from fees.nse_fee_calculator import NSEFeeCalculator
+
+        breakdown = NSEFeeCalculator(brokerage_per_order=brokerage).calculate_equity_intraday(
+            buy_price=filled_price,
+            sell_price=filled_price,  # exit leg approximated at fill price
+            quantity=int(quantity),
+            brokerage_per_order=brokerage,
+        )
+        return float(breakdown.get("total", 0.0))
+    except Exception:
+        # Unreachable in practice (pure in-repo arithmetic). Honest floor:
+        # BOTH brokerage legs + GST on them — never the old single-leg lie.
+        return round(2.0 * brokerage * 1.18, 2)
+
+
 # Try to import strategy registry – graceful fallback if not yet built
 try:
     from strategies.registry import StrategyRegistry
@@ -1809,7 +1852,7 @@ class UltraBotEngine:
                                         "Signal from %s on %s rejected by actual-size cost re-check: %s",
                                         strategy_name, symbol, _cost_reason,
                                     )
-                                    # Truthful accounting: it passed the 18 gates but
+                                    # Truthful accounting: it passed the 19 gates but
                                     # failed post-sizing validation.
                                     if self._signals_passed_count > 0:
                                         self._signals_passed_count -= 1
@@ -1831,6 +1874,66 @@ class UltraBotEngine:
                                         reason=_cost_reason,
                                     )
                                     continue
+
+                                # -------------------------------------------------
+                                # v0.4.9 wave-4: G19 fee-aware minimum-move
+                                # re-check at the ACTUAL sized quantity. Only
+                                # bites when risk.g19_mode == "enforce"; in the
+                                # default log_only mode it shadow-logs the
+                                # verdict so live days build the evidence base
+                                # before enforcement is switched on. (The G19
+                                # gate itself already ran pre-sizer at the
+                                # budget quantity — see risk_engine.)
+                                # -------------------------------------------------
+                                _g19_mode = str(_max_fee_pct_cfg.get("g19_mode", "log_only")).strip().lower()
+                                _g19_min_multiple = float(_max_fee_pct_cfg.get("min_move_fee_multiple", 2.0))
+                                _target_for_g19 = float(signal.get("target_price") or 0.0)
+                                _reward_actual = (
+                                    abs(_target_for_g19 - _entry_for_fee) * _actual_qty
+                                    if _target_for_g19 > 0 else 0.0
+                                )
+                                if _fees_actual > 0 and _reward_actual > 0:
+                                    _g19_multiple_actual = _reward_actual / _fees_actual
+                                    if _g19_multiple_actual < _g19_min_multiple:
+                                        if _g19_mode == "enforce":
+                                            _g19_reason = (
+                                                f"G19 minimum-move: target move ₹{_reward_actual:,.0f} is only "
+                                                f"{_g19_multiple_actual:.2f}× the round-trip costs "
+                                                f"₹{_fees_actual:,.0f} at the sized quantity "
+                                                f"({_actual_qty}) — below the {_g19_min_multiple:.1f}× "
+                                                f"minimum; fees would eat most of the reward."
+                                            )
+                                            logger.info(
+                                                "Signal from %s on %s rejected by actual-size G19 re-check: %s",
+                                                strategy_name, symbol, _g19_reason,
+                                            )
+                                            if self._signals_passed_count > 0:
+                                                self._signals_passed_count -= 1
+                                            self._signals_rejected_count += 1
+                                            self._rejections_by_gate["G19_MinMove"] = (
+                                                self._rejections_by_gate.get("G19_MinMove", 0) + 1
+                                            )
+                                            self._rejections_by_strategy[strategy_name] = (
+                                                self._rejections_by_strategy.get(strategy_name, 0) + 1
+                                            )
+                                            self._record_telemetry_event(
+                                                symbol=symbol,
+                                                strategy=strategy_name,
+                                                status="REJECTED",
+                                                direction=signal.get("direction", "—"),
+                                                price=current_price,
+                                                confidence=float(signal.get("confidence", 0.0)),
+                                                gate="G19_MinMove",
+                                                reason=_g19_reason,
+                                            )
+                                            continue
+                                        # log_only shadow (default): observe, never block.
+                                        logger.info(
+                                            "G19 SHADOW (actual size): %s/%s move multiple %.2f× < %.1f× "
+                                            "(reward ₹%.0f vs fees ₹%.0f, qty %d) — would block in enforce mode.",
+                                            strategy_name, symbol, _g19_multiple_actual,
+                                            _g19_min_multiple, _reward_actual, _fees_actual, _actual_qty,
+                                        )
                 except Exception as _cost_check_exc:
                     # A calculator bug must never block trading (same policy as G17).
                     logger.warning(
@@ -3221,21 +3324,14 @@ class UltraBotEngine:
 
         # --- Save trade and position to DB ---
         async with self._repo_context() as repo:
-            # Fees calculation
+            # v0.4.9 wave-4 fee-truth fix: entry-time estimate now uses the
+            # canonical FULL round-trip NSE model (both brokerage legs, both
+            # turnover legs, correct GST base) — the same calculator the
+            # close path and EOD reconciliation use. The old inline formula
+            # showed ~₹38-40 for what actually costs ~₹61-62.
             fees_config = self.config.get_fees_config()
             brokerage = float(fees_config.get("brokerage_per_order", 20))
-            ex_rate = float(fees_config.get("exchange_txn_pct", 0.0000345))
-            exchange_txn = invested_amount * (ex_rate if ex_rate < 0.001 else ex_rate / 100)
-            stt_rate = float(fees_config.get("stt_intraday_sell_pct", 0.00025))
-            stt = invested_amount * (stt_rate if stt_rate < 0.001 else stt_rate / 100)
-            sebi_rate = float(fees_config.get("sebi_fee_pct", 0.000001))
-            sebi_fee = invested_amount * (sebi_rate if sebi_rate < 0.0001 else sebi_rate / 100)
-            stamp_rate = float(fees_config.get("stamp_duty_pct", 0.00003))
-            stamp_duty = invested_amount * (stamp_rate if stamp_rate < 0.001 else stamp_rate / 100)
-            gst_rate = float(fees_config.get("gst_pct", 0.18))
-            gst_mult = gst_rate if gst_rate <= 1.0 else gst_rate / 100
-            gst = (brokerage + exchange_txn + stt + sebi_fee + stamp_duty) * gst_mult
-            total_fees = round(brokerage + exchange_txn + stt + sebi_fee + stamp_duty + gst, 2)
+            total_fees = _estimate_entry_round_trip_fees(filled_price, filled_qty, fees_config)
 
             trade_extra = {
                 "opportunity_id": opportunity_id,
