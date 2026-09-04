@@ -245,7 +245,7 @@ class EODReportGenerator:
                 "exit_price": float(getattr(t, "exit_price", 0) or 0),
                 "sl": float(getattr(t, "sl", 0)),
                 "target": float(getattr(t, "target", 0)),
-                "qty": int(getattr(t, "qty", 0)),
+                "qty": int(getattr(t, "quantity", 0)),
                 "pnl": float(getattr(t, "pnl", 0)),
                 "fees": float(getattr(t, "fees", 0)),
                 "brokerage": float(getattr(t, "brokerage", 0)),

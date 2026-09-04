@@ -79,7 +79,7 @@ def snapshot() -> None:
                 shutil.copy2(f, dst)
                 log(f"report backed up: {f.name}")
     # prune old snapshots (keep MAX_SNAPS by mtime, per extension family)
-    snaps = sorted(SNAP_DIR.glob("ultrabot-*-wal"), key=lambda p: p.mtime)
+    snaps = sorted(SNAP_DIR.glob("ultrabot-*-wal"), key=lambda p: p.stat().st_mtime)
     for extra in snaps[:-MAX_SNAPS]:
         stem = extra.name.replace("-wal", "")
         for suffix in ("-wal", "-shm", ".db"):
