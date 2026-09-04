@@ -58,7 +58,11 @@ NSE_HOLIDAYS_2026: list[date] = [
     date(2026, 5, 27),   # Bakri Id / Eid ul-Adha
     date(2026, 6, 26),   # Muharram
     date(2026, 8, 15),   # Independence Day
-    date(2026, 9, 4),    # Milad-un-Nabi
+    # NOTE: 2026-09-04 was previously listed here as Milad-un-Nabi — WRONG.
+    # Milad-un-Nabi 2026 falls ~Aug 26; NSE traded normally on Fri 2026-09-04
+    # (live-verified via Fyers 1m bars during the session). Removed as a
+    # live-day hotfix fri_2026-09-04_v0.4.9 — do NOT re-add without checking
+    # the official NSE circular.
     date(2026, 10, 2),   # Mahatma Gandhi Jayanti
     date(2026, 10, 20),  # Dussehra
     date(2026, 11, 8),   # Diwali Laxmi Pujan

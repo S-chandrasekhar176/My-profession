@@ -125,7 +125,12 @@ class EODReportGenerator:
 
         for t in closed_trades:
             t_pnl = float(getattr(t, "net_pnl", 0))
-            t_fees = float(getattr(t, "fees", 0)) + float(getattr(t, "brokerage", 0))
+            # v0.4.9 wave-4 fee-truth fix: trade.fees is the FULL round trip
+            # (both brokerage legs + statutory fees) since the close-path
+            # correction; the brokerage column is a per-order stat (₹20),
+            # NOT an extra cost. Adding it double-counted ₹20/trade in the
+            # summary (fees ₹61 + brokerage ₹20 = ₹81 reported).
+            t_fees = float(getattr(t, "fees", 0))
             t_gross = float(getattr(t, "pnl", t_pnl + t_fees))
             invested = float(getattr(t, "invested_amount", 0))
 
@@ -180,7 +185,10 @@ class EODReportGenerator:
         for t in closed_trades:
             strat = getattr(t, "strategy", "Unknown") or "Unknown"
             t_pnl = float(getattr(t, "net_pnl", 0))
-            t_fees = float(getattr(t, "fees", 0)) + float(getattr(t, "brokerage", 0))
+            # v0.4.9 wave-4: same fix as _compute_pnl_summary — fees already
+            # include both brokerage legs; adding the per-order brokerage
+            # column double-counted ₹20/trade.
+            t_fees = float(getattr(t, "fees", 0))
 
             if strat not in by_strat:
                 by_strat[strat] = {
@@ -237,7 +245,7 @@ class EODReportGenerator:
                 "exit_price": float(getattr(t, "exit_price", 0) or 0),
                 "sl": float(getattr(t, "sl", 0)),
                 "target": float(getattr(t, "target", 0)),
-                "qty": int(getattr(t, "qty", 0)),
+                "qty": int(getattr(t, "quantity", 0)),
                 "pnl": float(getattr(t, "pnl", 0)),
                 "fees": float(getattr(t, "fees", 0)),
                 "brokerage": float(getattr(t, "brokerage", 0)),
