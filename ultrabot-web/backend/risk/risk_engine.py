@@ -21,6 +21,7 @@ from risk.gates.g15_volume_liquidity import G15VolumeLiquidity
 from risk.gates.g16_multi_timeframe import G16MultiTimeframe
 from risk.gates.g17_cost_precheck import G17CostPreCheck
 from risk.gates.g18_strategy_guard import G18StrategyGuard
+from risk.gates.g19_min_move import G19MinMoveGate
 
 from core.capital_resolver import resolve_total_capital
 
@@ -36,7 +37,7 @@ def _wrap_signal(signal: Any) -> Any:
 
 
 class RiskEngine:
-    """Runs all 18 risk gates sequentially, stopping at the first failure.
+    """Runs all 19 risk gates sequentially, stopping at the first failure.
 
     Each gate receives the full risk config dict so it can read its own
     parameters. The ``repository`` is injected into G13 (duplicate
@@ -55,7 +56,7 @@ class RiskEngine:
         self.gates: List[Any] = self._build_gates()
 
     def _build_gates(self) -> List[Any]:
-        """Construct all 18 gates fresh from the current config values.
+        """Construct all 19 gates fresh from the current config values.
 
         Each gate reads its threshold(s) out of `config` in its own
         __init__ and caches them as plain instance attributes — cheap
@@ -82,6 +83,7 @@ class RiskEngine:
             G16MultiTimeframe(self.config),
             G17CostPreCheck(self.config),
             G18StrategyGuard(self.config),
+            G19MinMoveGate(self.config),
         ]
 
     def set_repository(self, repo: "Repository") -> None:
@@ -130,7 +132,7 @@ class RiskEngine:
             block_reason=None,
             severity="info",
             reduced_size=False,
-            notes="All 18 gates passed",
+            notes="All 19 gates passed",
         )
 
     async def evaluate(
@@ -144,7 +146,7 @@ class RiskEngine:
         """Convenience evaluation gateway for engine orchestrators.
         
         Accepts raw signal dictionary or object, builds/enriches context,
-        and executes all 18 risk gates.
+        and executes all 19 risk gates.
         """
         if isinstance(symbol, dict) and context is None:
             context = symbol

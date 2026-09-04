@@ -345,7 +345,7 @@ async def test_g18_zero_daily_pnl_passes():
 
 def test_risk_engine_has_18_gates():
     re_ = RiskEngine({})
-    assert len(re_.gates) == 18
+    assert len(re_.gates) == 19
     names = [g.__class__.__name__ for g in re_.gates]
     assert "G17CostPreCheck" in names and "G18StrategyGuard" in names
 
