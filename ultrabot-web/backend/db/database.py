@@ -54,6 +54,25 @@ async def init_db() -> None:
     """Create all tables if they don't exist."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # v0.4.12: create_all never alters EXISTING tables — a live v0.4.11
+    # database needs the feature columns added explicitly (idempotent,
+    # nullable-only, preserves every existing row).
+    from db.migrations import ensure_shadow_feature_columns
+
+    try:
+        added = ensure_shadow_feature_columns(str(DB_PATH))
+        if added:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "shadow_outcomes migration: added columns %s", added
+            )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "shadow_outcomes feature-column migration failed", exc_info=True
+        )
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

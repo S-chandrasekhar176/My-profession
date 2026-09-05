@@ -376,3 +376,58 @@ class ShadowOutcome(Base):
     registered_at: Mapped[str] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: _ist_now().isoformat())
+    # ── v0.4.12: point-in-time feature snapshot (ALL nullable) ──
+    # Captured at SCAN time from the exact candles the strategy saw and
+    # copied immutably into the row at registration (leakage guarantee).
+    # Legacy v0.4.11 rows keep every value — None means "not observed",
+    # never zero. The full raw vector also lives in features_json.
+    session_class: Mapped[str] = mapped_column(Text, nullable=True, index=True)
+    atr: Mapped[float] = mapped_column(Float, nullable=True)
+    atr_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    vwap_distance_pct: Mapped[float] = mapped_column(Float, nullable=True)
+    trend_strength: Mapped[float] = mapped_column(Float, nullable=True)
+    htf_trend: Mapped[str] = mapped_column(Text, nullable=True)
+    liquidity_ratio: Mapped[float] = mapped_column(Float, nullable=True)
+    features_json: Mapped[str] = mapped_column(Text, nullable=True)  # JSON
+    features_schema_version: Mapped[str] = mapped_column(Text, nullable=True)
+
+
+# v0.4.12 — idempotent column-add for existing shadow_outcomes tables.
+# create_all only creates MISSING tables; it never alters existing ones, so
+# a live v0.4.11 database needs explicit ALTER TABLE ADD COLUMN. Adding
+# nullable columns preserves every existing row untouched.
+SHADOW_FEATURE_COLUMNS = {
+    "session_class": "TEXT",
+    "atr": "REAL",
+    "atr_pct": "REAL",
+    "vwap_distance_pct": "REAL",
+    "trend_strength": "REAL",
+    "htf_trend": "TEXT",
+    "liquidity_ratio": "REAL",
+    "features_json": "TEXT",
+    "features_schema_version": "TEXT",
+}
+
+
+def ensure_shadow_feature_columns(db_path: str) -> list:
+    """Add the v0.4.12 feature columns to shadow_outcomes if missing.
+
+    Idempotent and safe on fresh databases (no table yet -> create_all will
+    make the full schema). Returns the list of columns actually added.
+    """
+    import sqlite3
+
+    added: list = []
+    conn = sqlite3.connect(db_path)
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(shadow_outcomes)")}
+        if not existing:
+            return added  # table does not exist yet
+        for col, ddl in SHADOW_FEATURE_COLUMNS.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE shadow_outcomes ADD COLUMN {col} {ddl}")
+                added.append(col)
+        conn.commit()
+    finally:
+        conn.close()
+    return added

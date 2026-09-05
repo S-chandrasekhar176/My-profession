@@ -116,6 +116,9 @@ risk:
   # (gate-blocked / TTL-expired / skipped / orphaned) resolves into the
   # shadow_outcomes table to feed the promotion-ladder Gate-2 ML clock.
   shadow_recorder_enabled: true
+  # v0.4.12: point-in-time feature snapshots at scan time (leakage-proof
+  # ML dataset columns on shadow_outcomes). Kill-switch mirrors the recorder.
+  shadow_feature_snapshot_enabled: true
 # v0.4.2 (P2): all 14 dormant strategies + TRS shadow-tracked every scan —
 # signals recorded, never traded; feeds GET /api/strategies/verdicts.
 strategy_shadow_mode:

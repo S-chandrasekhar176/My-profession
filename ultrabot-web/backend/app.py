@@ -54,6 +54,7 @@ from api.routes import (
     settings_api,
     scanner,
     candles,
+    analytics,
 )
 from api.websocket import ws_manager, router as ws_router
 
@@ -320,6 +321,7 @@ app.include_router(errors.router)
 app.include_router(settings_api.router)
 app.include_router(scanner.router)
 app.include_router(candles.router)
+app.include_router(analytics.router)
 app.include_router(ws_router)
 
 

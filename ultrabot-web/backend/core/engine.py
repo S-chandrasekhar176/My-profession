@@ -258,6 +258,11 @@ class UltraBotEngine:
         self._shadow_recorder_enabled: bool = bool(
             _risk_cfg_init.get("shadow_recorder_enabled", True)
         )
+        # v0.4.12: point-in-time feature snapshots on every scan-time signal
+        # (the leakage-proof ML dataset). Kill-switch mirrors the recorder.
+        self._shadow_feature_snapshot_enabled: bool = bool(
+            _risk_cfg_init.get("shadow_feature_snapshot_enabled", True)
+        )
     @asynccontextmanager
     async def _repo_context(self):
         """Context manager yielding repository and ensuring session cleanup."""
@@ -2094,6 +2099,22 @@ class UltraBotEngine:
 
             df_candles = candles_to_dataframe(candles)
 
+            # v0.4.12: point-in-time feature snapshot — computed from the
+            # EXACT candles the strategy is about to see, BEFORE any signal
+            # exists (leakage guarantee: nothing future may inform it).
+            # Attached to the signal dict; every shadow registration
+            # downstream copies it immutably into shadow_outcomes.
+            features_snapshot = None
+            if getattr(self, "_shadow_feature_snapshot_enabled", True):
+                try:
+                    from shadow.features import compute_feature_snapshot
+
+                    features_snapshot = compute_feature_snapshot(
+                        df_candles, now=datetime.now(IST)
+                    )
+                except Exception:
+                    features_snapshot = None
+
             res = None
             if hasattr(strat, "scan"):
                 if inspect.iscoroutinefunction(strat.scan):
@@ -2111,6 +2132,10 @@ class UltraBotEngine:
             if res and isinstance(res, dict):
                 res.setdefault("strategy", strategy_name)
                 res.setdefault("symbol", symbol)
+                if features_snapshot:
+                    # v0.4.12: ride the point-in-time snapshot on the signal
+                    # dict — _register_shadow copies it into the dataset.
+                    res.setdefault("features_snapshot", features_snapshot)
                 return res
         except Exception as scan_err:
             logger.warning("Strategy %s scan exception on %s: %s", strategy_name, symbol, scan_err, exc_info=True)
@@ -2774,6 +2799,16 @@ class UltraBotEngine:
             key = signal_id or (
                 f"blk:{symbol}:{strategy}:{uuid.uuid4().hex[:10]}"
             )
+            # v0.4.12: point-in-time feature snapshot rides in on
+            # signal_data (attached at scan time, BEFORE the signal existed
+            # — leakage guarantee). Copied by reference into the registry,
+            # then into the row IMMUTABLY at resolve time; the resolver must
+            # never write back into this dict.
+            _features = None
+            if isinstance(signal_data, dict):
+                candidate = signal_data.get("features_snapshot")
+                if isinstance(candidate, dict):
+                    _features = candidate
             self._shadow_signals[key] = {
                 "signal_id": signal_id,
                 "symbol": symbol,
@@ -2790,6 +2825,7 @@ class UltraBotEngine:
                 "feed_realtime_registered": self._shadow_realtime(),
                 "regime_at_signal": regime,
                 "vix_at_signal": vix,
+                "features": _features,
                 "mfe": 0.0,
                 "mae": 0.0,
             }
@@ -2903,6 +2939,18 @@ class UltraBotEngine:
                         # v0.4.11: the Gate-2 ML dataset row (always written,
                         # even for gate-blocked signals that have no row in
                         # the signals table).
+                        # v0.4.12: point-in-time feature vector — written
+                        # ONCE here, never mutated afterwards (the dataset
+                        # must stay leak-free and immutable per row).
+                        _features = sig.get("features")
+                        _features = _features if isinstance(_features, dict) else None
+                        _features_json = None
+                        if _features:
+                            import json as _json
+
+                            _features_json = _json.dumps(
+                                _features, sort_keys=True, default=str
+                            )
                         try:
                             await repo.create_shadow_outcome(
                                 signal_id=_signal_row_id,
@@ -2927,6 +2975,15 @@ class UltraBotEngine:
                                 blocking_gates=sig.get("blocking_gates") or [],
                                 registered_at=str(sig.get("created_at") or ""),
                                 resolved_at=datetime.now(IST).isoformat(),
+                                session_class=(_features or {}).get("session_class"),
+                                atr=(_features or {}).get("atr"),
+                                atr_pct=(_features or {}).get("atr_pct"),
+                                vwap_distance_pct=(_features or {}).get("vwap_distance_pct"),
+                                trend_strength=(_features or {}).get("trend_strength"),
+                                htf_trend=(_features or {}).get("htf_trend"),
+                                liquidity_ratio=(_features or {}).get("liquidity_ratio"),
+                                features_json=_features_json,
+                                features_schema_version=(_features or {}).get("schema_version"),
                             )
                         except Exception as so_err:
                             logger.warning(
@@ -4805,6 +4862,17 @@ class UltraBotEngine:
         except Exception:
             shadow_clock = {}
 
+        # v0.4.12: feature-snapshot coverage over the WHOLE shadow dataset
+        # (data-quality gate for the future ML stage — legacy rows carry no
+        # features by design; new rows should reach ~100% coverage).
+        feature_coverage: Dict[str, Any] = {}
+        try:
+            async with self._repo_context() as repo:
+                if repo is not None and hasattr(repo, "get_feature_coverage"):
+                    feature_coverage = await repo.get_feature_coverage()
+        except Exception:
+            feature_coverage = {}
+
         return {
             "state": self.state.value,
             "mode": self.mode,
@@ -4835,6 +4903,7 @@ class UltraBotEngine:
             "daily_pnl": pnl_data,
             "risk": risk_summary,
             "shadow_clock": shadow_clock,
+            "shadow_features": feature_coverage,
             "initial_capital": self.initial_capital,
             "feed_health": self.feed.get_status() if self.feed and hasattr(self.feed, "get_status") else (
                 self.feed_manager.get_status() if self.feed_manager and hasattr(self.feed_manager, "get_status") else None
