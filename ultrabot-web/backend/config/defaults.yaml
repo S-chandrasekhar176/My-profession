@@ -112,6 +112,10 @@ risk:
       MB: 0.75
       VC: 0.75
   shadow_signal_max_age_minutes: 90
+  # v0.4.11: universal shadow-outcome recorder — every never-traded signal
+  # (gate-blocked / TTL-expired / skipped / orphaned) resolves into the
+  # shadow_outcomes table to feed the promotion-ladder Gate-2 ML clock.
+  shadow_recorder_enabled: true
 # v0.4.2 (P2): all 14 dormant strategies + TRS shadow-tracked every scan —
 # signals recorded, never traded; feeds GET /api/strategies/verdicts.
 strategy_shadow_mode:

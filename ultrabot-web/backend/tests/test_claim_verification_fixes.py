@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from utils.market_utils import get_stock_sector
 from risk.risk_engine import RiskEngine
 from risk.gates.g1_max_positions import G1MaxPositions
 from risk.gates.g2_sector_concentration import G2SectorConcentration
@@ -180,7 +181,8 @@ async def test_g2_no_context_uses_config_three():
     # max_positions fallback = 3 -> 3*40/100 = 1.2 -> max(1, 1.2) = 1 -> min(2, 1) = 1
     res = await gate.check(
         signal={"symbol": "RELIANCE"},
-        context={"positions_by_sector": {"Energy": 1}},
+        # v0.4.11: sector attribution is dynamic — use the live taxonomy name
+        context={"positions_by_sector": {get_stock_sector("RELIANCE"): 1}},
     )
     assert res.passed is False  # 1 >= effective_max 1
 

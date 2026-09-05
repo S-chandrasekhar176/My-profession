@@ -25,6 +25,7 @@ from db.migrations import (
     ErrorLog,
     BacktestRun,
     DailySummary,
+    ShadowOutcome,
 )
 
 from utils.market_utils import get_stock_sector
@@ -1207,3 +1208,73 @@ class Repository:
 
         await self.session.flush()
         await self.session.commit()
+
+    # ────────────────────────────────────────
+    # SHADOW OUTCOMES (v0.4.11 — ML clock)
+    # ────────────────────────────────────────
+
+    async def create_shadow_outcome(self, **kwargs) -> ShadowOutcome:
+        data = {
+            "id": str(uuid.uuid4()),
+            "created_at": _ist_now(),
+        }
+        if "blocking_gates" in kwargs and isinstance(kwargs["blocking_gates"], (dict, list, tuple, set)):
+            kwargs["blocking_gates"] = _to_json(kwargs["blocking_gates"])
+        data.update(kwargs)
+        valid_cols = {c.name for c in ShadowOutcome.__table__.columns}
+        filtered_data = {k: v for k, v in data.items() if k in valid_cols}
+        obj = ShadowOutcome(**filtered_data)
+        return await self._add_and_flush(obj)
+
+    async def get_shadow_outcomes_today(self) -> List[ShadowOutcome]:
+        today = _today_str()
+        stmt = (
+            select(ShadowOutcome)
+            .where(ShadowOutcome.created_at.startswith(today))
+            .order_by(ShadowOutcome.created_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_shadow_clock(self) -> Dict[str, Any]:
+        """Aggregate today's resolved shadow outcomes into the ML clock.
+
+        Ladder rule: only samples with feed_realtime_registered AND
+        feed_realtime_resolved count toward the >=100 resolved-signal
+        promotion clock. Backup-feed rows are recorded but flagged out.
+        """
+        try:
+            rows = await self.get_shadow_outcomes_today()
+        except Exception:
+            return {
+                "resolved_today": 0, "realtime_resolved": 0,
+                "wins": 0, "losses": 0, "expired": 0, "win_rate_pct": 0.0,
+                "per_strategy": {},
+            }
+        realtime = [r for r in rows if r.feed_realtime_registered and r.feed_realtime_resolved]
+        wins = sum(1 for r in realtime if r.outcome == "SHADOW_TARGET")
+        losses = sum(1 for r in realtime if r.outcome == "SHADOW_SL")
+        expired = sum(1 for r in realtime if r.outcome == "SHADOW_EXPIRED")
+        resolved = len(realtime)
+        per_strategy: Dict[str, Dict[str, Any]] = {}
+        for r in realtime:
+            bucket = per_strategy.setdefault(r.strategy, {
+                "resolved": 0, "wins": 0, "losses": 0, "expired": 0, "pnl_sum": 0.0,
+            })
+            bucket["resolved"] += 1
+            bucket["pnl_sum"] = round(bucket["pnl_sum"] + float(r.pnl_per_share or 0.0), 2)
+            if r.outcome == "SHADOW_TARGET":
+                bucket["wins"] += 1
+            elif r.outcome == "SHADOW_SL":
+                bucket["losses"] += 1
+            else:
+                bucket["expired"] += 1
+        return {
+            "resolved_today": len(rows),
+            "realtime_resolved": resolved,
+            "wins": wins,
+            "losses": losses,
+            "expired": expired,
+            "win_rate_pct": round(wins / resolved * 100.0, 2) if resolved else 0.0,
+            "per_strategy": per_strategy,
+        }

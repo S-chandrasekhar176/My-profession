@@ -1,6 +1,8 @@
-# Fyers' official SDK declares a hard pin on aiohttp==3.9.x (and older
-# requests/websocket-client versions) that conflicts with this project's
-# aiohttp>=3.10.0 in requirements.txt.
+# Fyers' official SDK hard-pins old dependency versions in its metadata
+# (aiohttp==3.9.x — every published fyers-apiv3 version does — plus older
+# requests/websocket-client pins). requirements.txt therefore carries
+# aiohttp==3.9.3, aligned exactly with the SDK pin below, so the core file
+# stays resolvable on a clean machine (news engine imports aiohttp directly).
 #
 # We only ever construct FyersModel with is_async=False, which never
 # imports/uses aiohttp at all (verified by inspecting the installed
@@ -8,12 +10,15 @@
 # requests and websocket-client (its real, actually-used dependencies) are
 # already covered by requirements.txt.
 #
-# So: install this SEPARATELY, with --no-deps, so pip doesn't try to also
-# force-downgrade aiohttp/requests project-wide:
+# The SDK is still installed SEPARATELY, with --no-deps, so pip doesn't try
+# to also force the SDK's OTHER stale pins (older requests/websocket-client)
+# project-wide:
 #
 #   pip install --no-deps -r requirements-fyers.txt
 #
-# Run this AFTER `pip install -r requirements.txt`. See start.sh, which
-# does this automatically.
+# Run this AFTER `pip install -r requirements.txt`, then install the SDK's
+# undeclared runtime deps: `pip install -r requirements-fyers-extra.txt`.
+# setup.sh performs the full two-step install automatically (see its
+# steps 3/4); tests/test_requirements_consistency.py guards this contract.
 
 fyers-apiv3==3.1.16

@@ -83,3 +83,4 @@ tool-results/
 /tests/
 /AGENTS.md
 /CLAUDE.md
+.venv/

@@ -2,6 +2,8 @@
 import pytest
 from types import SimpleNamespace
 
+from utils.market_utils import get_stock_sector
+
 from risk.gates.g1_max_positions import G1MaxPositions
 from risk.gates.g2_sector_concentration import G2SectorConcentration
 from risk.gates.g3_max_position_size import G3MaxPositionSize
@@ -87,8 +89,11 @@ class TestG2SectorConcentration:
     async def test_fail_sector_full(self):
         gate = G2SectorConcentration(DEFAULT_CONFIG)
         signal = make_signal()
+        # v0.4.11: sector taxonomy is now dynamic (TradingView) — build the
+        # fixture from the live attribution instead of a hardcoded name.
+        reliance_sector = get_stock_sector("RELIANCE")
         ctx = make_context(
-            positions_by_sector={"Energy": 2},
+            positions_by_sector={reliance_sector: 2},
         )
         result = await gate.check(signal, ctx)
         assert result.passed is False
@@ -97,7 +102,7 @@ class TestG2SectorConcentration:
         gate = G2SectorConcentration(DEFAULT_CONFIG)
         signal = make_signal()
         ctx = make_context(
-            positions_by_sector={"Energy": 1},
+            positions_by_sector={get_stock_sector("RELIANCE"): 1},
         )
         result = await gate.check(signal, ctx)
         assert result.passed is True

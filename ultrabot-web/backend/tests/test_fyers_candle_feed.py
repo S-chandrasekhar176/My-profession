@@ -338,7 +338,11 @@ def test_effective_interval_after_failover_relaxes_to_180():
 
     assert engine._effective_scan_interval() == 60  # realtime first
     for _ in range(3):
-        asyncio.get_event_loop().run_until_complete(fm.get_candles("X"))
+        # v0.4.11 fix: asyncio.run is loop-state-safe (the old
+        # get_event_loop().run_until_complete depends on deprecated
+        # MainThread loop bookkeeping and fails depending on which async
+        # tests ran before it in the same session).
+        asyncio.run(fm.get_candles("X"))
     assert engine._effective_scan_interval() == 180  # relaxed after failover
 
 
