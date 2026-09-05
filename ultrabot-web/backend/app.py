@@ -251,6 +251,23 @@ async def lifespan(app: FastAPI):
     auto_resume_task = asyncio.create_task(_auto_resume_task())
     app.state.auto_resume_task = auto_resume_task
 
+    # -- v0.4.10: Interactive Telegram (two-way) --------------
+    # Opportunity cards with Approve/Reject/Skip buttons, commands
+    # (/status /positions /pnl /pause /resume) and canary alerts.
+    # Uses the SAME engine decision path as the web dashboard;
+    # only the configured chat_id is honored.
+    if notif_config.get("telegram_interactive_enabled", False):
+        from notifications.telegram_interactive import InteractiveTelegramBot
+
+        interactive_tg = InteractiveTelegramBot(
+            telegram_bot=telegram_bot,
+            engine=eng,
+            repo_getter=repo_getter,
+            notif_config=notif_config,
+        )
+        interactive_tg.start()
+        app.state.telegram_interactive = interactive_tg
+
     logger.info("UltraBot Web started")
     logger.info("Market status: %s", market_hours.get_market_status())
 
@@ -262,6 +279,8 @@ async def lifespan(app: FastAPI):
         catchup_task.cancel()
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.stop()
+    if hasattr(app.state, "telegram_interactive"):
+        await app.state.telegram_interactive.stop()
     if eng.state.value != "stopped":
         await eng.stop()
     logger.info("UltraBot Web stopped")

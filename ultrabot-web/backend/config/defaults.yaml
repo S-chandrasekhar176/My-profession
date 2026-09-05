@@ -207,8 +207,15 @@ fees:
   stamp_duty_pct: 3.0e-05
 notifications:
   telegram_enabled: true
-  telegram_bot_token: 8864941949:AAE_p27BIDwPAyQTGBreaepdDURk-v06ClU
+  # v0.4.10: PRIVATE bot (BotFather @chandu_ultrabot_bot, owner chat 5284252833).
+  # The previous token belonged to a third-party tool whose server consumed
+  # getUpdates (button taps never reached us) - retired for interactive use.
+  telegram_bot_token: 8959315649:AAEBZufqy1RpOGqkyz3L-NCJssGeL80R95U
   telegram_chat_id: '5284252833'
+  # v0.4.10: two-way interactive Telegram
+  telegram_interactive_enabled: true
+  telegram_canary_enabled: true
+  telegram_poll_timeout: 25
   morning_briefing_time: 08:30
   eod_report_time: '15:45'
   alert_trade_executed: true
