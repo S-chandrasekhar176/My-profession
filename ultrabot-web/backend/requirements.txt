@@ -18,7 +18,13 @@ bcrypt==4.1.2
 cryptography==41.0.7
 python-dotenv==1.0.0
 pyyaml==6.0.1
-aiohttp>=3.10.0
+# aiohttp is exact-pinned to 3.9.3: every published fyers-apiv3 version hard-pins
+# aiohttp==3.8.x/3.9.x, so any higher floor makes `pip install -r requirements.txt`
+# ResolutionImpossible on a clean machine. 3.9.3 is the version the pinned SDK
+# requires and the version the full backend suite is verified against (news
+# engine imports aiohttp directly). Do NOT raise without re-checking the SDK pin
+# in requirements-fyers.txt and updating tests/test_requirements_consistency.py.
+aiohttp==3.9.3
 feedparser==6.0.11
 beautifulsoup4==4.12.2
 apscheduler==3.10.4
@@ -26,5 +32,8 @@ python-multipart==0.0.6
 pytest==7.4.3
 pytest-asyncio==0.23.2
 pyotp>=2.9.0
-fyers-apiv3>=0.3.5
+# fyers-apiv3 is deliberately NOT listed here: its hard aiohttp/requests pins
+# conflict with this file under plain pip resolution. The SDK is installed
+# separately with --no-deps (see requirements-fyers.txt; setup.sh step 3/4
+# performs the two-step install automatically).
 reportlab

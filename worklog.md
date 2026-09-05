@@ -955,3 +955,22 @@ Stage Summary:
 - v0.4.11 COMPLETE on branch sat_2026-09-05_v0.4.11 (NOT merged — user reviews/merges via PR per workflow)
 - ML clock starts Monday 2026-09-07: every never-traded signal resolves into shadow_outcomes; Gate-2 clock = realtime_resolved count in /status
 - Known: MFE/MAE LTP-lower-bound; NAM sectorless (manifested); gate-blocked rows live only in shadow_outcomes (no blotter noise)
+
+---
+Task ID: FIX-V0411-REQ
+Agent: Super Z (dev session)
+Task: Post-review hotfix — requirements.txt ResolutionImpossible (test-round finding) + universe-probe adjudication
+
+Work Log:
+- Test round finding CONFIRMED against committed code: requirements.txt carried BOTH fyers-apiv3>=0.3.5 AND aiohttp>=3.10.0 — every published fyers-apiv3 hard-pins aiohttp==3.8.x/3.9.x -> pip ResolutionImpossible on any clean machine (fresh clone/CI/deploy dead at install)
+- Root cause of the miss: the designed two-step install ALREADY existed (requirements-fyers.txt pinning fyers-apiv3==3.1.16 with --no-deps; setup.sh steps 2-4 perform it) but the stale fyers-apiv3 line in requirements.txt deadlocked step 2 before the design could work; requirements-fyers.txt header even cited start.sh (stale — it's setup.sh)
+- FIX: requirements.txt — fyers-apiv3 line removed (canonical home requirements-fyers.txt), aiohttp>=3.10.0 -> aiohttp==3.9.3 (exact version the pinned SDK requires AND the combo the whole suite runs green on; news/news_engine.py imports aiohttp directly so it stays a declared core dep); requirements-fyers.txt header rewritten to current truth
+- PROVEN: pip install --dry-run --ignore-installed -r requirements.txt resolves cleanly against real PyPI (exit 0, zero resolution errors) — the exact scenario that previously failed
+- REGRESSION GUARDS: tests/test_requirements_consistency.py (5 static tests) — no fyers in core reqs; aiohttp pin must equal SDK-required version (FYERS_AIOHTTP_PIN map); fyers files keep --no-deps contract; setup.sh keeps two-step flow; direct aiohttp consumers stay declared
+- Universe probes adjudicated (test round flagged TMCV missing + extras overlap): TMCV in FNO_UNIVERSE=False is now BY DESIGN (CASH_ONLY_UNIVERSE tier, is_cash_only=True / is_fno_tradeable=False, preserved across regenerations — runtime verified); extras overlap is asserted POST-FILTER (runtime extras, raw list = curated superset by design); next-round probes documented: FNO_UNIVERSE==211, is_cash_only('TMCV')==True, manifest generated_at present (209/211 sectors)
+- TESTS: 859 passed / 0 failed (854 + 5 new), 31.2s
+- RELEASE_NOTES_v0.4.11.md section 7 added (hotfix rationale + evidence + updated probe spec)
+
+Stage Summary:
+- Fresh-install blocker ELIMINATED and contract-locked; branch sat_2026-09-05_v0.4.11 now 2 commits ahead of main for user PR review
+- Test-round universe flags: both adjudicated as design changes (not regressions) with corrected probes documented for the next round

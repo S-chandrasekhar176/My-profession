@@ -121,3 +121,51 @@ learning value.
   committed dated artifacts otherwise).
 - Rollback: `risk.shadow_recorder_enabled: false` disables new registrations
   (existing rows stay); sector map auto-degrades if the artifact is removed.
+
+## 7. Post-review hotfix — dependency resolution (v0.4.11.1, same branch)
+
+**Found by the independent test round:** `pip install -r requirements.txt`
+was **ResolutionImpossible** on a clean machine — every published
+fyers-apiv3 version hard-pins `aiohttp==3.8.x/3.9.x`, while
+requirements.txt demanded `aiohttp>=3.10.0` AND still listed
+`fyers-apiv3>=0.3.5` itself. No version combination could ever satisfy
+both; fresh clones, CI, and new machines died at install time. The repo
+already contained the *designed* fix (two-step install: core requirements +
+`requirements-fyers.txt` with `--no-deps`, performed by `setup.sh` steps
+2–4) — but the stale `fyers-apiv3` line in requirements.txt deadlocked step
+2 before the design could work.
+
+**Fix (evidence-based, not guesswork):**
+- `requirements.txt`: `fyers-apiv3>=0.3.5` **removed** (canonical home is
+  `requirements-fyers.txt`, installed `--no-deps`); `aiohttp>=3.10.0` →
+  **`aiohttp==3.9.3`** — the exact version the pinned SDK
+  (`fyers-apiv3==3.1.16`) requires and the combination the entire backend
+  suite is verified green on (`news/news_engine.py` imports aiohttp
+  directly, so it stays a declared core dependency).
+- `requirements-fyers.txt` header rewritten to current truth (no more stale
+  claim that start.sh performs the install — it's `setup.sh` steps 3–4).
+- **Proven fixed**: `pip install --dry-run --ignore-installed -r
+  requirements.txt` now resolves cleanly against real PyPI (exit 0, no
+  ResolutionImpossible) — the exact scenario that previously failed.
+- **Regression guards**: `tests/test_requirements_consistency.py` (5 static
+  tests) locks the contract: no fyers-apiv3 in core requirements, aiohttp
+  pin must exactly match the SDK's required version (version-map checked),
+  fyers files keep their `--no-deps` contract, setup.sh keeps the two-step
+  flow, direct aiohttp consumers stay declared.
+- **Test totals: 859 passed / 0 failed** (854 + 5 new).
+
+**Universe-hygiene probes from the same test round — status update:**
+the two flagged checks measured the RAW list, and the invariants moved in
+v0.4.11 by design:
+- `TMCV present: False` in `FNO_UNIVERSE` is now **intentional**: TMCV has
+  no F&O derivative series, so it lives in the new `CASH_ONLY_UNIVERSE`
+  tier with full metadata (`is_cash_only('TMCV') == True`,
+  `is_fno_tradeable('TMCV') == False`) and is preserved across
+  regenerations. The 2 red hygiene tests from earlier rounds are green.
+- `extras overlap 34/45` is now measured **post-filter**:
+  `test_extra_picks_do_not_overlap_core` asserts the RUNTIME-filtered
+  extras (core ∪ extras minus core duplicates) contain no overlap; the raw
+  list is a curated superset by design.
+- Updated probes for the next round: `FNO_UNIVERSE` size == 211,
+  `is_cash_only('TMCV')` == True, sector map manifest present with
+  `generated_at` (209/211 sectors resolved, NAM recorded as unknown).
