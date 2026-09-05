@@ -28,6 +28,14 @@ from options.options_risk import OptionsRiskChecker
 from options.greeks import GreeksCalculator
 from utils.market_utils import get_stock_sector, get_last_candle_age_minutes
 from utils.direction import is_long_direction as _is_long_direction
+from shadow.shadow_utils import (
+    KIND_GATE_BLOCKED,
+    KIND_NEVER_TRADED,
+    KIND_STRATEGY_SHADOW,
+    extract_blocking_gates,
+    feed_is_realtime,
+    update_excursion,
+)
 from core.capital_resolver import resolve_total_capital
 
 logger = logging.getLogger(__name__)
@@ -243,6 +251,13 @@ class UltraBotEngine:
             str(k).upper(): float(v) for k, v in (_ff_mults.items() if isinstance(_ff_mults, dict) else [])
         }
         self._shadow_max_age_minutes: float = float(_risk_cfg_init.get("shadow_signal_max_age_minutes", 90))
+        # v0.4.11: universal shadow-outcome recorder (ML clock). When on,
+        # EVERY signal that never becomes a trade — gate-blocked, TTL-
+        # expired, user-skipped, restart-orphaned — resolves hypothetically
+        # into the shadow_outcomes table (the Gate-2 promotion dataset).
+        self._shadow_recorder_enabled: bool = bool(
+            _risk_cfg_init.get("shadow_recorder_enabled", True)
+        )
     @asynccontextmanager
     async def _repo_context(self):
         """Context manager yielding repository and ensuring session cleanup."""
@@ -616,6 +631,15 @@ class UltraBotEngine:
                                 "target": float(sig.target or 0.0),
                                 "created_at": sig.created_at,
                                 "signal_data": sig_data,
+                                # v0.4.11 recorder metadata
+                                "kind": KIND_STRATEGY_SHADOW,
+                                "never_traded_reason": None,
+                                "blocking_gates": [],
+                                "feed_realtime_registered": self._shadow_realtime(),
+                                "regime_at_signal": None,
+                                "vix_at_signal": None,
+                                "mfe": 0.0,
+                                "mae": 0.0,
                             }
                 if self._shadow_signals:
                     logger.info(
@@ -1641,6 +1665,26 @@ class UltraBotEngine:
                         "Signal from %s on %s blocked by risk: %s",
                         strategy_name, symbol, reason_msg,
                     )
+                    # v0.4.11 ML clock: gate-blocked signals finally enter
+                    # the shadow dataset (Friday 2026-09-04 burned ~197 such
+                    # samples with zero learning value). No signal row is
+                    # created — the outcome lives only in shadow_outcomes,
+                    # tagged with the exact blocking gates.
+                    self._register_shadow(
+                        signal_id=None,
+                        symbol=symbol,
+                        direction=signal.get("direction", "LONG"),
+                        strategy=strategy_name,
+                        entry_price=signal.get("entry_price") or current_price,
+                        stop_loss=signal.get("sl_price") or 0.0,
+                        target=signal.get("target_price") or 0.0,
+                        kind=KIND_GATE_BLOCKED,
+                        never_traded_reason="GATE_BLOCKED",
+                        blocking_gates=extract_blocking_gates(risk_result),
+                        signal_data=signal,
+                        regime=self.current_regime,
+                        vix=self.vix,
+                    )
                     continue
 
                 self._signals_passed_count += 1
@@ -1682,17 +1726,20 @@ class UltraBotEngine:
                             vix_at_signal=self.vix,
                         )
                         if sig_obj is not None:
-                            self._shadow_signals[sig_obj.id] = {
-                                "signal_id": sig_obj.id,
-                                "symbol": symbol,
-                                "direction": signal.get("direction", "LONG"),
-                                "strategy": strategy_name,
-                                "entry_price": float(signal.get("entry_price") or current_price),
-                                "stop_loss": float(signal.get("sl_price") or 0.0),
-                                "target": float(signal.get("target_price") or 0.0),
-                                "created_at": sig_obj.created_at,
-                                "signal_data": signal,
-                            }
+                            self._register_shadow(
+                                signal_id=sig_obj.id,
+                                symbol=symbol,
+                                direction=signal.get("direction", "LONG"),
+                                strategy=strategy_name,
+                                entry_price=float(signal.get("entry_price") or current_price),
+                                stop_loss=float(signal.get("sl_price") or 0.0),
+                                target=float(signal.get("target_price") or 0.0),
+                                kind=KIND_STRATEGY_SHADOW,
+                                signal_data=signal,
+                                created_at=str(sig_obj.created_at),
+                                regime=self.current_regime,
+                                vix=self.vix,
+                            )
                     except Exception as shadow_rec_err:
                         logger.warning(
                             "Shadow signal recording failed for %s/%s: %s",
@@ -2385,20 +2432,23 @@ class UltraBotEngine:
             async with self._repo_context() as repo:
                 if repo is None or not hasattr(repo, "get_signals_by_status"):
                     return 0
-                orphan_ids: list = []
+                orphan_rows: list = []
+                seen_ids: set = set()
                 # create_signal writes lowercase 'pending'; be defensive
                 # about casing in case anything ever wrote 'PENDING'.
                 for status_val in ("pending", "PENDING"):
                     try:
                         for sig in await repo.get_signals_by_status(status_val):
-                            if getattr(sig, "id", None) and sig.id not in orphan_ids:
-                                orphan_ids.append(sig.id)
+                            _sid = getattr(sig, "id", None)
+                            if _sid and _sid not in seen_ids:
+                                seen_ids.add(_sid)
+                                orphan_rows.append(sig)
                     except Exception:
                         continue
-                for sig_id in orphan_ids:
+                for sig in orphan_rows:
                     try:
                         await repo.update_signal(
-                            sig_id,
+                            sig.id,
                             status="EXPIRED",
                             rejection_reason=(
                                 "Pending opportunity lost on engine restart — "
@@ -2406,10 +2456,24 @@ class UltraBotEngine:
                             ),
                         )
                         expired += 1
+                        # v0.4.11 ML clock: restart-orphaned pendings join the
+                        # shadow dataset (geometry survives on the signal row).
+                        self._register_shadow(
+                            signal_id=sig.id,
+                            symbol=getattr(sig, "symbol", ""),
+                            direction=getattr(sig, "direction", "LONG"),
+                            strategy=getattr(sig, "strategy", ""),
+                            entry_price=getattr(sig, "entry_price", 0.0) or 0.0,
+                            stop_loss=getattr(sig, "stop_loss", 0.0) or 0.0,
+                            target=getattr(sig, "target", 0.0) or 0.0,
+                            kind=KIND_NEVER_TRADED,
+                            never_traded_reason="ORPHAN_EXPIRED",
+                            created_at=str(getattr(sig, "created_at") or ""),
+                        )
                     except Exception as sig_err:
                         logger.warning(
                             "Could not expire orphaned pending signal %s: %s",
-                            sig_id, sig_err,
+                            getattr(sig, "id", "?"), sig_err,
                         )
         except Exception as exc:
             logger.warning("Could not sweep orphaned pending signals: %s", exc, exc_info=True)
@@ -2636,9 +2700,104 @@ class UltraBotEngine:
                         except Exception as sig_err:
                             logger.warning("Could not update signal status in DB for %s: %s", opp.get("signal_id"), sig_err, exc_info=True)
 
+                    # v0.4.11 ML clock: an opportunity that never became a
+                    # trade (TTL, adverse move, target-gone, regime shift,
+                    # session close) still resolves hypothetically.
+                    self._register_shadow(
+                        signal_id=opp.get("signal_id"),
+                        symbol=opp.get("symbol", ""),
+                        direction=opp.get("direction", "BUY"),
+                        strategy=opp.get("strategy", ""),
+                        entry_price=opp.get("entry_price", 0.0),
+                        stop_loss=opp.get("stop_loss", 0.0),
+                        target=opp.get("target", 0.0),
+                        kind=KIND_NEVER_TRADED,
+                        never_traded_reason=reason_code,
+                        created_at=opp.get("created_at"),
+                        regime=self.current_regime,
+                        vix=self.vix,
+                    )
+
     # ------------------------------------------------------------------
-    # Shadow Signal Outcome Tracking (Phase 1)
+    # Shadow Signal Outcome Tracking (Phase 1 + v0.4.11 universal recorder)
     # ------------------------------------------------------------------
+
+    def _shadow_realtime(self) -> bool:
+        """Realtime classification for shadow samples (v0.4.11 ladder rule).
+
+        Prefers the engine's data-source classification (it knows the ACTIVE
+        feed — Fyers primary vs Yahoo backup). No feed -> False: un-
+        verifiable samples are recorded but flagged OUT of the promotion
+        clock rather than blindly counted.
+        """
+        try:
+            return bool(self._is_realtime_feed_active())
+        except Exception:
+            return feed_is_realtime(self.feed)
+
+    def _register_shadow(
+        self,
+        *,
+        signal_id: Optional[str],
+        symbol: str,
+        direction: str,
+        strategy: str,
+        entry_price: float,
+        stop_loss: float,
+        target: float,
+        kind: str,
+        never_traded_reason: Optional[str] = None,
+        blocking_gates: Optional[List[str]] = None,
+        signal_data: Optional[dict] = None,
+        regime: Optional[str] = None,
+        vix: Optional[float] = None,
+        created_at: Optional[str] = None,
+    ) -> None:
+        """Register a signal for shadow outcome tracking (v0.4.11).
+
+        One registry (self._shadow_signals) for all kinds — strategy-shadow,
+        never-traded, gate-blocked. Never raises: the ML dataset must never
+        be able to break the trading loop.
+        """
+        try:
+            if not getattr(self, "_shadow_recorder_enabled", True):
+                return
+
+            def _sf(v) -> float:
+                """Sanitize geometry — garbage becomes 0.0 (kept sample with
+                unusable geometry is dropped at resolve time, honestly)."""
+                try:
+                    return float(v or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            key = signal_id or (
+                f"blk:{symbol}:{strategy}:{uuid.uuid4().hex[:10]}"
+            )
+            self._shadow_signals[key] = {
+                "signal_id": signal_id,
+                "symbol": symbol,
+                "direction": direction,
+                "strategy": strategy,
+                "entry_price": _sf(entry_price),
+                "stop_loss": _sf(stop_loss),
+                "target": _sf(target),
+                "created_at": created_at or datetime.now(IST).isoformat(),
+                "signal_data": signal_data or {},
+                "kind": kind,
+                "never_traded_reason": never_traded_reason,
+                "blocking_gates": blocking_gates or [],
+                "feed_realtime_registered": self._shadow_realtime(),
+                "regime_at_signal": regime,
+                "vix_at_signal": vix,
+                "mfe": 0.0,
+                "mae": 0.0,
+            }
+        except Exception:
+            logger.warning(
+                "Shadow registration failed for %s/%s",
+                symbol, strategy, exc_info=True,
+            )
 
     async def _evaluate_shadow_signals(self) -> None:
         """Resolve open SHADOW signals against live prices.
@@ -2683,6 +2842,9 @@ class UltraBotEngine:
                 continue  # no live price this cycle — retry next loop
 
             is_long = direction in ("BUY", "LONG")
+            # v0.4.11: LTP-basis MFE/MAE tracking (lower bound of the true
+            # intrabar excursion — we only ever see last-traded prices).
+            update_excursion(sig, price, is_long)
             outcome = None
             exit_price = price
 
@@ -2724,23 +2886,63 @@ class UltraBotEngine:
             async with self._repo_context() as repo:
                 if repo is not None:
                     try:
+                        _signal_row_id = sig.get("signal_id")
                         _existing = sig.get("signal_data") if isinstance(sig.get("signal_data"), dict) else {}
                         _updated_data = dict(_existing)
                         _updated_data["shadow_result"] = {
                             "outcome": outcome,
                             "exit_price": round(float(exit_price), 2),
                             "pnl_per_share": round(float(pnl_per_share), 2),
+                            "mfe": round(float(sig.get("mfe") or 0.0), 2),
+                            "mae": round(float(sig.get("mae") or 0.0), 2),
+                            "kind": sig.get("kind", "strategy_shadow"),
+                            "never_traded_reason": sig.get("never_traded_reason"),
+                            "feed_realtime": bool(sig.get("feed_realtime_registered", True)),
                             "resolved_at": datetime.now(IST).isoformat(),
                         }
-                        await repo.update_signal(
-                            sig_id,
-                            status=outcome,
-                            notes=(
-                                f"Shadow outcome {outcome} at ₹{exit_price:.2f} "
-                                f"(per-share P&L ₹{pnl_per_share:+.2f})"
-                            ),
-                            signal_data=_updated_data,
-                        )
+                        # v0.4.11: the Gate-2 ML dataset row (always written,
+                        # even for gate-blocked signals that have no row in
+                        # the signals table).
+                        try:
+                            await repo.create_shadow_outcome(
+                                signal_id=_signal_row_id,
+                                session_id=getattr(self, "session_id", None),
+                                symbol=symbol,
+                                direction=direction,
+                                strategy=str(sig.get("strategy") or ""),
+                                kind=str(sig.get("kind") or "strategy_shadow"),
+                                never_traded_reason=sig.get("never_traded_reason"),
+                                entry_price=round(entry, 2),
+                                stop_loss=round(sl, 2),
+                                target=round(target, 2),
+                                exit_price=round(float(exit_price), 2),
+                                outcome=outcome,
+                                pnl_per_share=round(float(pnl_per_share), 2),
+                                mfe=round(float(sig.get("mfe") or 0.0), 2),
+                                mae=round(float(sig.get("mae") or 0.0), 2),
+                                feed_realtime_registered=bool(sig.get("feed_realtime_registered", True)),
+                                feed_realtime_resolved=self._shadow_realtime(),
+                                regime_at_signal=sig.get("regime_at_signal"),
+                                vix_at_signal=sig.get("vix_at_signal"),
+                                blocking_gates=sig.get("blocking_gates") or [],
+                                registered_at=str(sig.get("created_at") or ""),
+                                resolved_at=datetime.now(IST).isoformat(),
+                            )
+                        except Exception as so_err:
+                            logger.warning(
+                                "shadow_outcomes row failed for %s/%s: %s",
+                                symbol, sig.get("strategy"), so_err,
+                            )
+                        if _signal_row_id:
+                            await repo.update_signal(
+                                _signal_row_id,
+                                status=outcome,
+                                notes=(
+                                    f"Shadow outcome {outcome} at ₹{exit_price:.2f} "
+                                    f"(per-share P&L ₹{pnl_per_share:+.2f})"
+                                ),
+                                signal_data=_updated_data,
+                            )
                     except Exception as sig_up_err:
                         logger.warning("Shadow signal update failed for %s: %s", sig_id, sig_up_err)
 
@@ -2750,12 +2952,17 @@ class UltraBotEngine:
         for sig_id, sig, outcome, exit_price, pnl_per_share in resolved:
             await self._broadcast("shadow_signal", {
                 "type": "shadow_signal_resolved",
-                "signal_id": sig_id,
+                "signal_id": sig.get("signal_id") or sig_id,
                 "symbol": sig.get("symbol"),
                 "strategy": sig.get("strategy"),
                 "outcome": outcome,
                 "exit_price": round(float(exit_price), 2),
                 "pnl_per_share": round(float(pnl_per_share), 2),
+                # v0.4.11 recorder context
+                "kind": sig.get("kind", "strategy_shadow"),
+                "never_traded_reason": sig.get("never_traded_reason"),
+                "mfe": round(float(sig.get("mfe") or 0.0), 2),
+                "mae": round(float(sig.get("mae") or 0.0), 2),
             })
 
     # ------------------------------------------------------------------
@@ -3506,6 +3713,24 @@ class UltraBotEngine:
                     await repo.update_signal(signal_id, status="skipped")
         except Exception as exc:
             logger.debug("Could not update signal status: %s", exc)
+
+        # v0.4.11 ML clock: a user-skipped opportunity still resolves
+        # hypothetically — the human decision is itself training data
+        # (would the trade have won?).
+        self._register_shadow(
+            signal_id=opportunity.get("signal_id"),
+            symbol=opportunity.get("symbol", ""),
+            direction=opportunity.get("direction", "BUY"),
+            strategy=opportunity.get("strategy", ""),
+            entry_price=opportunity.get("entry_price", 0.0),
+            stop_loss=opportunity.get("stop_loss", 0.0),
+            target=opportunity.get("target", 0.0),
+            kind=KIND_NEVER_TRADED,
+            never_traded_reason="USER_SKIPPED",
+            created_at=opportunity.get("created_at"),
+            regime=self.current_regime,
+            vix=self.vix,
+        )
 
         await self._broadcast("opportunity", {
             "type": "opportunity_skipped",
@@ -4570,6 +4795,16 @@ class UltraBotEngine:
         except Exception:
             pass
 
+        # v0.4.11: ML clock — today's resolved shadow outcomes (Gate-2
+        # promotion dataset; realtime-only rows count toward the ladder).
+        shadow_clock: Dict[str, Any] = {}
+        try:
+            async with self._repo_context() as repo:
+                if repo is not None and hasattr(repo, "get_shadow_clock"):
+                    shadow_clock = await repo.get_shadow_clock()
+        except Exception:
+            shadow_clock = {}
+
         return {
             "state": self.state.value,
             "mode": self.mode,
@@ -4599,6 +4834,7 @@ class UltraBotEngine:
             "uptime_seconds": round(uptime_seconds, 1),
             "daily_pnl": pnl_data,
             "risk": risk_summary,
+            "shadow_clock": shadow_clock,
             "initial_capital": self.initial_capital,
             "feed_health": self.feed.get_status() if self.feed and hasattr(self.feed, "get_status") else (
                 self.feed_manager.get_status() if self.feed_manager and hasattr(self.feed_manager, "get_status") else None

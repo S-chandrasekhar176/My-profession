@@ -116,17 +116,26 @@ class TestApiUniverseRouteHygiene:
             assert sym not in DEAD_SYMBOLS, f"Dead symbol {sym} in /universe extras"
 
     def test_extra_picks_do_not_overlap_core(self):
+        """v0.4.11: _EXTRA_PICKS is a curated SUPERSET; the route filters it
+        against the live core universe (api/routes/watchlist.py line ~199).
+        The invariant is on the RUNTIME extras output — after filtering,
+        nothing may duplicate core. (The raw list may legitimately contain
+        symbols that were extras once and later entered the F&O core, e.g.
+        TRENT/ADANIGREEN when the universe grew from 51 to 210.)"""
         from api.routes.watchlist import _EXTRA_PICKS
         core = {s["symbol"] for s in FNO_UNIVERSE}
-        extras = [sym for sym, _ in _EXTRA_PICKS]
-        assert not (set(extras) & core), "Extras duplicate core universe symbols"
-        assert len(extras) == len(set(extras)), "Duplicate extras"
+        runtime_extras = [sym for sym, _ in _EXTRA_PICKS if sym not in core]
+        assert not (set(runtime_extras) & core), "Runtime extras duplicate core universe symbols"
+        assert len(runtime_extras) == len(set(runtime_extras)), "Duplicate extras"
 
     def test_renamed_symbols_mapped_to_new_tickers(self):
+        """v0.4.11: renamed symbols must be reachable via /universe — core OR
+        extras (ETERNAL entered the F&O core after the rename, so requiring
+        it in extras specifically broke when the universe grew)."""
         from api.routes.watchlist import _EXTRA_PICKS
-        extras = {sym for sym, _ in _EXTRA_PICKS}
-        assert "ETERNAL" in extras, "ETERNAL (renamed ZOMATO) should be a pick"
-        assert "UNITDSPR" in extras, "UNITDSPR (renamed MCDOWELL-N) should be a pick"
+        universe = {s["symbol"] for s in FNO_UNIVERSE} | {sym for sym, _ in _EXTRA_PICKS}
+        assert "ETERNAL" in universe, "ETERNAL (renamed ZOMATO) not reachable"
+        assert "UNITDSPR" in universe, "UNITDSPR (renamed MCDOWELL-N) not reachable"
 
 
 class TestG6CorrelationPairsHygiene:

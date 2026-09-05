@@ -917,3 +917,41 @@ Work Log:
 Stage Summary:
 - Live day complete: dynamic watchlist -> 410+ signals -> gates -> 8 trades -> all exit paths -> square-off -> EOD, zero errors, three-restart resilience proven
 - Deliverables: v0.4.8 zip + EOD data JSON + release notes inside the zip + this worklog
+
+---
+Task ID: SYNC-V0410-BASE
+Agent: Super Z (dev session)
+Task: Verify GitHub main = v0.4.10; fix stale v0.4.8 handoff page; align all working copies
+
+Work Log:
+- VERIFIED: origin/main @50f7a97 = "Merge PR #3 (fri_2026-09-04_v0.4.10)"; v0.4.10 commit c6c86f5 + v0.4.9 consolidation (PR #2, 5cd450e) underneath; telegram_interactive.py (689 lines) + RELEASE_NOTES_v0.4.10.md confirmed on origin/main
+- SANDBOX WIPE INCIDENT 02:09: bot_analysis/* and old handoff page + v0.4.8 zip + test-prompt file wiped by external cleaner; github-push/My-profession clone SURVIVED with full objects
+- RECOVERY: dev repo re-cloned from surviving clone -> reset to origin/main @50f7a97 (verified: interactive module + private token present = true v0.4.10)
+- BUILT scripts/build_v0410_zip.sh: rsync excludes, SCRUBS private Telegram token from defaults.yaml + pristine snapshot (YOUR_BOT_TOKEN_HERE), secret assertions (private token / old hijacked token / ghp_ PAT -> build fails), v0.4.10 content assertions; zip = 473 files, 1.9MB, sha256 113524fa...83628; published download/ + public/
+- REBUILT src/app/page.tsx handoff page: v0.4.10 hero + honest stats (2 releases, 821 tests / 2 pre-existing, main @50f7a97), v0.4.10 + v0.4.9 highlights, security/token note, roadmap, git state
+- RECREATED download/ULTRABOT_PHASE_TEST_PROMPT.md (232 lines, English-only verified)
+
+Stage Summary:
+- ALL ALIGNED ON v0.4.10: GitHub main @50f7a97 = local dev repo = handoff page = distributable zip
+- v0.4.11 implementation can start from main @50f7a97 (branch per work-day, PR to merge)
+- NOTE: sidecar reference files (dhan_master.csv, fo_mktlots.csv at bot_analysis root) lost in wipe — v0.4.11 sector map must regenerate from broker/NSE APIs or re-export; rebuild_fno_universe.py exists
+
+---
+Task ID: IMPL-V0411
+Agent: Super Z (dev session)
+Task: v0.4.11 — sector map (G2 flow recovery) + TMCV universe fix + universal shadow-outcome recorder
+
+Work Log:
+- Branch sat_2026-09-05_v0.4.11 from main @50f7a97
+- DIAGNOSIS CONFIRMED at runtime: 210-symbol universe, only ~50 with sector metadata; COLPAL/TRENT/KALYANKJIL -> "Unknown" (Friday's G2 false block root cause)
+- NEW scripts/build_sector_map.py: Dhan public master (fresh fetch, lots via mode-across-expiries) + TradingView India scanner (bulk sector+industry, TV_ALIASES for symbol-form mismatches); emits fno_universe_generated.py (211 entries w/ sector+industry+cash_only) + config/sector_map.json (dated manifest, staleness guard 45d, unknown_symbols recorded)
+- Coverage: 209/211 sectors resolved (NAM too new); Friday replay: TRENT+KALYANKJIL = Retail Trade (real peers grouped), COLPAL = Consumer Non-Durables (false collision gone)
+- TMCV: CASH_ONLY_UNIVERSE tier in market_utils (source of truth) preserved by builder + defensively re-added at import; new is_fno_tradeable()/is_cash_only(); json.dumps null->None literal bug found+fixed (silent fallback to 51 symbols)
+- SHADOW RECORDER: shadow/shadow_utils.py (pure logic) + ShadowOutcome table (migrations) + repo create_shadow_outcome/get_shadow_clock + engine _register_shadow()/_shadow_realtime() with 4 hook sites (gate-blocked scan path, TTL invalidation loop, user skip, restart-orphan sweep) + resolver now tracks LTP-basis MFE/MAE and writes outcome rows with feed_realtime_registered/resolved ladder flags; /status exposes shadow_clock; kill-switch risk.shadow_recorder_enabled (defaults.yaml + pristine in sync)
+- TESTS: 854 passed / 0 failed (was 821+2 failing); +31 new (test_sector_map.py, test_shadow_recorder.py); G2 fixtures now derive sector names from live taxonomy; fyers failover test migrated off deprecated asyncio.get_event_loop; phase1 stub binds real _register_shadow
+- 5 mid-development failures triaged and fixed: 2x G2 taxonomy, 1x mock engine stub (MagicMock(spec) auto-mocked new methods), 1x fixture math, 1x event-loop order fragility
+
+Stage Summary:
+- v0.4.11 COMPLETE on branch sat_2026-09-05_v0.4.11 (NOT merged — user reviews/merges via PR per workflow)
+- ML clock starts Monday 2026-09-07: every never-traded signal resolves into shadow_outcomes; Gate-2 clock = realtime_resolved count in /status
+- Known: MFE/MAE LTP-lower-bound; NAM sectorless (manifested); gate-blocked rows live only in shadow_outcomes (no blotter noise)

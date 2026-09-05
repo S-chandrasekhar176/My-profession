@@ -637,6 +637,11 @@ def _scan_engine_stub(repo):
     eng.shadow_strategies = {"TRS"}
     eng._shadow_signals = {}
     eng._shadow_max_age_minutes = 90
+    # v0.4.11: bind the REAL recorder machinery so the stub exercises the
+    # actual registration path (autospec mocks would swallow registrations).
+    eng._shadow_recorder_enabled = True
+    eng._register_shadow = UltraBotEngine._register_shadow.__get__(eng)
+    eng._shadow_realtime = MagicMock(return_value=True)
     eng.current_regime = "Bull"
     eng.vix = 14.0
     eng.session_id = "phase1-shadow-test"

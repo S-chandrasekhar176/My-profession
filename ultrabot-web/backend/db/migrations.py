@@ -332,3 +332,47 @@ class DailySummary(Base):
     extra: Mapped[str] = mapped_column(Text, nullable=False, default="{}")  # JSON
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: _ist_now().isoformat())
     updated_at: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: _ist_now().isoformat())
+
+
+# ──────────────────────────────────────────────
+# 12. shadow_outcomes (v0.4.11 — ML clock)
+# ──────────────────────────────────────────────
+class ShadowOutcome(Base):
+    """One row per RESOLVED shadow-tracked signal.
+
+    This is the promotion-ladder Gate-2 dataset: every signal that never
+    became a real position (gate-blocked, TTL-expired, user-skipped, or
+    whole-strategy shadow mode) resolves here with its hypothetical
+    outcome. Ladder rule: only rows with feed_realtime_registered AND
+    feed_realtime_resolved count toward the >=100 resolved-sample clock
+    (backup-feed samples are recorded but flagged).
+    """
+    __tablename__ = "shadow_outcomes"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_generate_uuid)
+    signal_id: Mapped[str] = mapped_column(Text, nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=True, index=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)  # LONG, SHORT
+    strategy: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # strategy_shadow | never_traded | gate_blocked
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # USER_SKIPPED | SETUP_TIMEOUT_EXPIRED | ORPHAN_EXPIRED | GATE_BLOCKED | ...
+    never_traded_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    target: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    exit_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # SHADOW_TARGET | SHADOW_SL | SHADOW_EXPIRED
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    pnl_per_share: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mfe: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    mae: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    feed_realtime_registered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    feed_realtime_resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    regime_at_signal: Mapped[str] = mapped_column(Text, nullable=True)
+    vix_at_signal: Mapped[float] = mapped_column(Float, nullable=True)
+    blocking_gates: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON
+    registered_at: Mapped[str] = mapped_column(Text, nullable=True)
+    resolved_at: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: _ist_now().isoformat())
