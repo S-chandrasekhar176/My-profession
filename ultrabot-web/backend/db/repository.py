@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -1277,4 +1277,211 @@ class Repository:
             "expired": expired,
             "win_rate_pct": round(wins / resolved * 100.0, 2) if resolved else 0.0,
             "per_strategy": per_strategy,
+        }
+
+    # ------------------------------------------------------------------
+    # v0.4.12 — shadow analytics (Milestone-1 measurement layer)
+    # ------------------------------------------------------------------
+
+    _SHADOW_GROUPERS = {
+        "strategy": lambda r: r.strategy or "unknown",
+        "symbol": lambda r: r.symbol or "unknown",
+        "regime": lambda r: r.regime_at_signal or "unknown",
+        "session": lambda r: getattr(r, "session_class", None) or "unknown",
+        "htf_trend": lambda r: getattr(r, "htf_trend", None) or "unknown",
+        "direction": lambda r: r.direction or "unknown",
+        "kind": lambda r: r.kind or "unknown",
+    }
+
+    async def _shadow_rows_since(self, cutoff_iso: str) -> List[ShadowOutcome]:
+        stmt = (
+            select(ShadowOutcome)
+            .where(ShadowOutcome.resolved_at.is_not(None))
+            .where(ShadowOutcome.resolved_at >= cutoff_iso)
+            .order_by(ShadowOutcome.resolved_at.desc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    def _shadow_bucket_stats(rows: List[ShadowOutcome]) -> Dict[str, Any]:
+        """Aggregate one bucket of resolved shadow rows (pure, testable)."""
+        total = len(rows)
+        realtime = [
+            r for r in rows
+            if r.feed_realtime_registered and r.feed_realtime_resolved
+        ]
+        wins = sum(1 for r in realtime if r.outcome == "SHADOW_TARGET")
+        losses = sum(1 for r in realtime if r.outcome == "SHADOW_SL")
+        expired = sum(1 for r in realtime if r.outcome == "SHADOW_EXPIRED")
+        resolved = len(realtime)
+
+        mfes = [float(r.mfe or 0.0) for r in realtime]
+        maes = [float(r.mae or 0.0) for r in realtime]
+        pnls = [float(r.pnl_per_share or 0.0) for r in realtime]
+        # R-multiples only where honest risk geometry exists (|entry - sl| > 0)
+        r_mfes, r_maes = [], []
+        for r in realtime:
+            risk = abs(float(r.entry_price or 0.0) - float(r.stop_loss or 0.0))
+            if risk > 0:
+                r_mfes.append(float(r.mfe or 0.0) / risk)
+                r_maes.append(float(r.mae or 0.0) / risk)
+
+        def _avg(values):
+            return round(sum(values) / len(values), 4) if values else None
+
+        return {
+            "resolved": resolved,
+            "wins": wins,
+            "losses": losses,
+            "expired": expired,
+            "win_rate_pct": round(wins / resolved * 100.0, 2) if resolved else 0.0,
+            "avg_mfe": _avg(mfes),
+            "avg_mae": _avg(maes),
+            "avg_r_mfe": _avg(r_mfes),
+            "avg_r_mae": _avg(r_maes),
+            "avg_pnl_per_share": _avg(pnls),
+            "sum_pnl_per_share": round(sum(pnls), 2) if pnls else 0.0,
+            "total_rows": total,
+        }
+
+    async def get_shadow_analytics(
+        self,
+        group_by: str = "strategy",
+        days: int = 30,
+        realtime_only: bool = True,
+    ) -> Dict[str, Any]:
+        """Baseline analytics over resolved shadow outcomes (v0.4.12).
+
+        Answers the Milestone-1 question — which strategies work, under what
+        conditions, with what risk — from the shadow dataset, before any ML
+        exists. Aggregation over rows whose resolved_at falls inside the
+        window; ladder rule applied via the realtime flags.
+
+        Honest empty state: fewer than MIN rows in the window returns
+        status="insufficient_data" rather than flattering percentages.
+        """
+        grouper = self._SHADOW_GROUPERS.get(group_by)
+        if grouper is None:
+            return {
+                "status": "invalid_group",
+                "allowed_groups": sorted(self._SHADOW_GROUPERS.keys()),
+            }
+        days = max(1, int(days))
+        cutoff = (datetime.now(IST) - timedelta(days=days)).isoformat()
+        try:
+            rows = await self._shadow_rows_since(cutoff)
+        except Exception:
+            return {"status": "query_failed", "buckets": {}, "overall": None}
+
+        if realtime_only:
+            rows = [r for r in rows if r.feed_realtime_registered and r.feed_realtime_resolved]
+
+        overall = self._shadow_bucket_stats(rows)
+        MIN_RESOLVED = 10
+        if overall["resolved"] < MIN_RESOLVED:
+            return {
+                "status": "insufficient_data",
+                "group_by": group_by,
+                "days": days,
+                "resolved_in_window": overall["resolved"],
+                "min_required": MIN_RESOLVED,
+                "note": (
+                    "Percentages over tiny samples lie. Keep collecting — "
+                    "the Gate-2 clock needs >=100 realtime-resolved samples."
+                ),
+                "buckets": {},
+                "overall": overall,
+            }
+
+        buckets: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            buckets.setdefault(str(grouper(r)), []).append(r)
+        return {
+            "status": "ok",
+            "group_by": group_by,
+            "days": days,
+            "realtime_only": bool(realtime_only),
+            "resolved_in_window": overall["resolved"],
+            "buckets": {k: self._shadow_bucket_stats(v) for k, v in sorted(buckets.items())},
+            "overall": overall,
+        }
+
+    async def get_shadow_weekly(self, group_by: str = "strategy", weeks: int = 8) -> Dict[str, Any]:
+        """Weekly roll-up of resolved shadow outcomes (v0.4.12).
+
+        Buckets by ISO week of resolved_at; per-week totals plus the chosen
+        group breakdown. Pure reporting — no promotion decisions here.
+        """
+        grouper = self._SHADOW_GROUPERS.get(group_by)
+        if grouper is None:
+            return {"status": "invalid_group", "allowed_groups": sorted(self._SHADOW_GROUPERS.keys())}
+        weeks = max(1, min(52, int(weeks)))
+        cutoff = (datetime.now(IST) - timedelta(weeks=weeks)).isoformat()
+        try:
+            rows = await self._shadow_rows_since(cutoff)
+        except Exception:
+            return {"status": "query_failed", "weeks": {}}
+
+        week_buckets: Dict[str, List[ShadowOutcome]] = {}
+        for r in rows:
+            try:
+                day = str(r.resolved_at or r.created_at or "")[:10]
+                iso = datetime.strptime(day, "%Y-%m-%d").isocalendar()
+                label = f"{iso.year}-W{iso.week:02d}"
+            except (ValueError, TypeError):
+                continue
+            week_buckets.setdefault(label, []).append(r)
+
+        out: Dict[str, Any] = {}
+        for label, wk_rows in sorted(week_buckets.items())[-weeks:]:
+            realtime = [r for r in wk_rows if r.feed_realtime_registered and r.feed_realtime_resolved]
+            wins = sum(1 for r in realtime if r.outcome == "SHADOW_TARGET")
+            resolved = len(realtime)
+            by_group: Dict[str, Dict[str, int]] = {}
+            for r in realtime:
+                g = str(grouper(r))
+                slot = by_group.setdefault(g, {"resolved": 0, "wins": 0})
+                slot["resolved"] += 1
+                if r.outcome == "SHADOW_TARGET":
+                    slot["wins"] += 1
+            out[label] = {
+                "resolved": resolved,
+                "win_rate_pct": round(wins / resolved * 100.0, 2) if resolved else 0.0,
+                "by_group": by_group,
+            }
+        return {
+            "status": "ok" if out else "insufficient_data",
+            "group_by": group_by,
+            "weeks": out,
+        }
+
+    async def get_feature_coverage(self) -> Dict[str, Any]:
+        """How much of the shadow dataset carries point-in-time features.
+
+        Data-quality transparency for the ML stage: legacy v0.4.11 rows have
+        no feature snapshot; coverage must reach ~100% of NEW rows before
+        model training starts. Never raises.
+        """
+        try:
+            stmt = select(ShadowOutcome)
+            result = await self.session.execute(stmt)
+            rows = list(result.scalars().all())
+        except Exception:
+            return {"rows_total": 0, "rows_with_features": 0, "coverage_pct": 0.0}
+        total = len(rows)
+        with_features = sum(1 for r in rows if getattr(r, "features_json", None))
+        with_session = sum(1 for r in rows if getattr(r, "session_class", None))
+        by_kind: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            slot = by_kind.setdefault(r.kind or "unknown", {"total": 0, "with_features": 0})
+            slot["total"] += 1
+            if getattr(r, "features_json", None):
+                slot["with_features"] += 1
+        return {
+            "rows_total": total,
+            "rows_with_features": with_features,
+            "coverage_pct": round(with_features / total * 100.0, 2) if total else 0.0,
+            "rows_with_session": with_session,
+            "by_kind": by_kind,
         }

@@ -974,3 +974,23 @@ Work Log:
 Stage Summary:
 - Fresh-install blocker ELIMINATED and contract-locked; branch sat_2026-09-05_v0.4.11 now 2 commits ahead of main for user PR review
 - Test-round universe flags: both adjudicated as design changes (not regressions) with corrected probes documented for the next round
+
+---
+Task ID: IMPL-V0412
+Agent: Super Z (dev session)
+Task: v0.4.12 — Milestone-1 measurement (point-in-time feature snapshot + shadow analytics + baseline report)
+
+Work Log:
+- Branch sat_2026-09-05_v0.4.12 from merged main @04d0930 (PR #4)
+- SANDBOX INCIDENT (recovered): nested dev-repo .git wiped by cleaner mid-session -> my sync commands hit the OUTER workspace repo (/home/z/my-project) and reset --hard clobbered its main (f8c9491 -> 04d0930), deleting bot_analysis blobs; RECOVERED fully: outer main reset back to f8c9491, stray branch/ref removed, dev repo revived via git init+fetch+reset --hard origin/main, fresh .venv rebuilt via the exact setup.sh flow (CORE/FYERS/EXTRA all exit 0 — dogfoods the v0.4.11.1 requirements fix end-to-end; only cosmetic websocket-client pin notice), 859/0 verified on the fresh venv before starting
+- FEATURE SNAPSHOT (headline): new shadow/features.py — pure, never-raises, schema_version v1; session_class (5 IST buckets), ATR/ATR%, VWAP distance %, trend strength ((EMA9-EMA21)/ATR14, scale-free), htf_trend (15m resample vs EMA20 -> up/down/flat), liquidity_ratio (rel volume), features_json full vector + computed_at + n_candles + has_volume; None = not observed, never zero (leakage guarantee)
+- ENGINE WIRING: snapshot computed in _execute_strategy_scan from the EXACT df the strategy sees BEFORE signal exists; rides signal dict as features_snapshot; _register_shadow copies into registry by reference; resolver writes it ONCE into the row (never mutated after); kill-switch risk.shadow_feature_snapshot_enabled (defaults.yaml + pristine in sync)
+- MIGRATION: 9 nullable columns on shadow_outcomes + ensure_shadow_feature_columns() (idempotent ALTER TABLE ADD COLUMN) wired into init_db(); create_all covers fresh DBs; legacy rows preserved — test-proven at ROW level
+- ANALYTICS: repo get_shadow_analytics (7 group keys, avg MFE/MAE, R-multiples vs |entry-SL|, realtime-only ladder default, HONEST insufficient_data <10 resolved), get_shadow_weekly (ISO weeks), get_feature_coverage; /status now exposes shadow_features
+- API: GET /api/analytics/shadow, /shadow/weekly, /shadow/features (auth-guarded, 400 invalid group)
+- SCRIPT: scripts/build_baseline_report.py — markdown baseline (dataset quality, per-strategy/regime/session/symbol, weekly, Gate-2 clock); smoke-tested on empty DB = honest INSUFFICIENT DATA sections
+- TESTS: 909 passed / 0 failed (859 + 50 new: 28 feature math, 22 analytics/migration/API/flow); 2 mid-development fixes: 4dp rounding alignment, asyncio strict-mode markers
+Stage Summary:
+- v0.4.12 COMPLETE on branch sat_2026-09-05_v0.4.12 (NOT merged — user reviews/merges via PR per workflow)
+- Monday 2026-09-07 open: shadow rows now carry full point-in-time feature vectors from day 1; coverage climbs toward ~100% of new rows
+- Next: v0.4.13 = Milestone-2 (market context + anomaly monitors + rule-based proposal engine)
