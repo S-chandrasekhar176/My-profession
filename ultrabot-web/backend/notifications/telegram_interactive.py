@@ -65,6 +65,52 @@ def _fmt_money(val: Any) -> str:
         return "\u20b9—"
 
 
+def compute_pnl_view(pnl: Optional[Dict[str, Any]], open_positions: Optional[List[Any]]) -> Dict[str, float]:
+    """Map today's P&L into {realized, unrealized, total} for the /pnl command.
+
+    v0.4.12.1 hotfix (live 2026-09-07): the handler previously read
+    ``realized_pnl`` / ``unrealized_pnl`` keys that ``get_todays_pnl()`` never
+    returns (it returns ``net_pnl`` / ``gross_pnl`` / ...), so /pnl printed
+    ₹0.00 / ₹0.00 all day regardless of trading activity.
+
+    - realized   = net P&L of today's CLOSED trades (repo ``net_pnl``).
+    - unrealized = direction-aware MTM of open positions from
+      ``current_price`` (same math as the dashboard stats endpoint),
+      because ``positions.unrealized_pnl`` is not maintained by the engine.
+    - total      = realized + unrealized.
+    """
+    realized = 0.0
+    if pnl:
+        for key in ("net_pnl", "realized_pnl", "realized"):
+            val = pnl.get(key)
+            if val is not None:
+                try:
+                    realized = float(val)
+                except (TypeError, ValueError):
+                    realized = 0.0
+                break
+
+    unrealized = 0.0
+    for p in open_positions or []:
+        try:
+            entry = float(getattr(p, "entry_price", 0) or 0)
+            current = float(getattr(p, "current_price", 0) or 0) or entry
+            qty = float(getattr(p, "quantity", getattr(p, "qty", 0)) or 0)
+            if entry <= 0 or qty <= 0:
+                continue
+            direction = str(getattr(p, "direction", "")).upper()
+            sign = 1 if direction in ("BUY", "LONG") else -1
+            unrealized += (current - entry) * qty * sign
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+    return {
+        "realized": round(realized, 2),
+        "unrealized": round(unrealized, 2),
+        "total": round(realized + unrealized, 2),
+    }
+
+
 class InteractiveTelegramBot:
     """Two-way Telegram bridge between the user's mobile and the engine."""
 
@@ -445,6 +491,22 @@ class InteractiveTelegramBot:
                 trades = getattr(eng, "_trades_executed", 0)
                 pending = len(getattr(eng, "pending_opportunities", {}) or {})
                 session_id = getattr(eng, "session_id", None) or "—"
+                # v0.4.12.1 hotfix: engine counters reset on restart/auto-resume
+                # (live 09:42 restart showed Trades 0 with 3 trades in DB).
+                # The DB is the source of truth for today's executed trades.
+                if self.repo_getter is not None:
+                    repo = await self.repo_getter()
+                    try:
+                        todays_trades = await repo.get_trades_by_date(
+                            datetime.now(IST).date().isoformat(), limit=500
+                        )
+                        trades = len(todays_trades or [])
+                    except Exception:
+                        pass  # keep in-memory counter as fallback
+                    finally:
+                        close = getattr(repo, "close", None)
+                        if close:
+                            await close()
                 run_min = int((datetime.now(IST) - self.started_at).total_seconds() // 60)
                 await self._tg(
                     "sendMessage", chat_id=self._chat_id,
@@ -489,20 +551,26 @@ class InteractiveTelegramBot:
                 repo = await self.repo_getter()
                 try:
                     pnl = await repo.get_todays_pnl() or {}
+                    open_positions = await repo.get_open_positions()
                 finally:
                     close = getattr(repo, "close", None)
                     if close:
                         await close()
-                realized = pnl.get("realized_pnl", pnl.get("realized", 0))
-                unrealized = pnl.get("unrealized_pnl", pnl.get("unrealized", 0))
-                total = pnl.get("total_pnl", pnl.get("total"))
+                # v0.4.12.1 hotfix: get_todays_pnl() returns net_pnl/gross_pnl
+                # — it has NO realized_pnl/unrealized_pnl keys, so the old
+                # .get() chain always printed ₹0.00/₹0.00. compute_pnl_view()
+                # maps realized from net_pnl and computes direction-aware
+                # unrealized MTM from open positions' current_price.
+                view = compute_pnl_view(pnl, open_positions)
+                realized = view["realized"]
+                unrealized = view["unrealized"]
+                total = view["total"]
                 lines = [
                     f"💰 <b>Today's P&amp;L</b> · {datetime.now(IST).strftime('%d %b %H:%M')}",
                     f"Realized: <b>{_fmt_money(realized)}</b>",
                     f"Unrealized: <b>{_fmt_money(unrealized)}</b>",
+                    f"Total: <b>{_fmt_money(total)}</b>",
                 ]
-                if total is not None:
-                    lines.append(f"Total: <b>{_fmt_money(total)}</b>")
                 await self._tg(
                     "sendMessage", chat_id=self._chat_id, text="\n".join(lines), parse_mode="HTML",
                 )
