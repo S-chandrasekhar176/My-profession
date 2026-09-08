@@ -628,7 +628,10 @@ export interface ScanTelemetryEvent {
   time: string;
   symbol: string;
   strategy: string;
-  status: 'PASSED' | 'REJECTED' | 'NO_SETUP';
+  // v0.4.16: 'SHADOW_PASSED' (shadow ledger), 'OPPORTUNITY_CREATED' (card
+  // actually broadcast) and 'ERROR' arrive from the engine's scan timeline —
+  // widen the union so the telemetry card can render them honestly.
+  status: 'PASSED' | 'REJECTED' | 'NO_SETUP' | 'SHADOW_PASSED' | 'OPPORTUNITY_CREATED' | 'ERROR';
   direction?: string;
   price?: number;
   confidence?: number;

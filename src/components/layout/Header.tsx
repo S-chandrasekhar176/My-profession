@@ -16,12 +16,16 @@ interface MarketIndexItem {
   changePct: number;
 }
 
+// v0.4.16 (user-testing feedback 2026-09-08): the cold-start values used to
+// be HARDCODED from an old session (NIFTY 24361.90 etc.) — the banner showed
+// stale numbers with a fake direction until the first live fetch landed.
+// Honest placeholders now: price 0 renders as "—" until real data arrives.
 const INITIAL_INDICES: MarketIndexItem[] = [
-  { id: 'nifty', name: 'NIFTY', price: 24361.90, change: -33.95, changePct: -0.14 },
-  { id: 'sensex', name: 'SENSEX', price: 77903.43, change: -176.53, changePct: -0.23 },
-  { id: 'banknifty', name: 'BANKNIFTY', price: 57589.75, change: -45.50, changePct: -0.08 },
-  { id: 'midcpnifty', name: 'MIDCPNIFTY', price: 15071.85, change: -6.30, changePct: -0.04 },
-  { id: 'finnifty', name: 'FINNIFTY', price: 26306.20, change: -28.40, changePct: -0.11 },
+  { id: 'nifty', name: 'NIFTY', price: 0, change: 0, changePct: 0 },
+  { id: 'sensex', name: 'SENSEX', price: 0, change: 0, changePct: 0 },
+  { id: 'banknifty', name: 'BANKNIFTY', price: 0, change: 0, changePct: 0 },
+  { id: 'midcpnifty', name: 'MIDCPNIFTY', price: 0, change: 0, changePct: 0 },
+  { id: 'finnifty', name: 'FINNIFTY', price: 0, change: 0, changePct: 0 },
 ];
 
 const BROKER_NAMES: Record<string, string> = {
@@ -214,8 +218,9 @@ export default function Header() {
   const safeEngineStatus = engineStatus || 'stopped';
   const isEngineRunning = safeEngineStatus === 'running';
 
-  const rawVix = vix > 0 ? vix : (marketData?.vix && marketData.vix > 0 ? marketData.vix : 11.36);
-  const displayVix = typeof rawVix === 'number' && !isNaN(rawVix) && rawVix > 0 ? rawVix : 11.36;
+  // v0.4.16: no fabricated VIX — show "—" until a real value arrives.
+  const rawVix = vix > 0 ? vix : (marketData?.vix && marketData.vix > 0 ? marketData.vix : 0);
+  const displayVix = typeof rawVix === 'number' && !isNaN(rawVix) && rawVix > 0 ? rawVix : 0;
   const brokerLabel = activeBroker ? (BROKER_NAMES[activeBroker.toLowerCase()] || activeBroker) : 'Yahoo Live';
 
   return (
@@ -270,18 +275,26 @@ export default function Header() {
                         : 'text-ub-text-primary'
                     }`}
                   >
-                    {typeof idx.price === 'number' && !isNaN(idx.price)
+                    {/* v0.4.16: honest "—" placeholder until the first live
+                        quote replaces the zero placeholder. */}
+                    {idx.price > 0
                       ? idx.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                      : '0.00'}
+                      : '—'}
                   </span>
                   <span
                     className={`font-mono text-[11px] font-semibold ${
-                      isNegative ? 'text-rose-400' : 'text-emerald-400'
+                      idx.price <= 0
+                        ? 'text-ub-text-disabled'
+                        : idx.change === 0
+                          ? 'text-ub-text-muted'
+                          : isNegative
+                            ? 'text-rose-400'
+                            : 'text-emerald-400'
                     }`}
                   >
-                    {typeof idx.changePct === 'number' && !isNaN(idx.changePct)
+                    {idx.price > 0 && typeof idx.changePct === 'number' && !isNaN(idx.changePct)
                       ? `${idx.changePct >= 0 ? '+' : ''}${idx.changePct.toFixed(2)}%`
-                      : '0.00%'}
+                      : '—'}
                   </span>
                 </div>
               );
@@ -330,7 +343,7 @@ export default function Header() {
           <Badge
             className="hidden sm:inline-flex px-2 py-0.5 text-[10px] font-semibold border-0 rounded-full bg-ub-surface text-ub-text-muted"
           >
-            VIX {displayVix.toFixed(1)}
+            VIX {displayVix > 0 ? displayVix.toFixed(1) : '—'}
           </Badge>
 
           {/* Market Status & Countdown Timer */}

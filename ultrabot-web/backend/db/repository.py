@@ -253,7 +253,13 @@ class Repository:
         trades = await self.get_trades_by_date(today, limit=500)
         closed = [t for t in trades if t.status == "CLOSED"]
         gross_pnl = sum((t.pnl or 0.0) for t in closed)
-        total_fees = sum((t.fees or 0.0) for t in closed) + sum((t.brokerage or 0.0) for t in closed)
+        # v0.4.16 (user-testing feedback 2026-09-08): the brokerage sum
+        # double-counted costs. Since v0.4.8-HF (live-run-2) the close path
+        # writes the FULL round-trip fee — both brokerage legs included —
+        # into `fees`, while `brokerage` still holds the entry-time per-order
+        # snapshot. Adding both inflated "Today's P&L → fees" by ₹20-40 per
+        # trade and broke gross − fees = net on the dashboard.
+        total_fees = sum((t.fees or 0.0) for t in closed)
         net_pnl = sum((t.net_pnl or 0.0) for t in closed)
         wins = sum(1 for t in closed if t.net_pnl > 0)
         losses = sum(1 for t in closed if t.net_pnl < 0)

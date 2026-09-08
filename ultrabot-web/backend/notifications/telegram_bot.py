@@ -220,8 +220,18 @@ class TelegramBot:
             exit_reason = str(trade.get("exit_reason") or "").upper()
         else:
             exit_reason = str(getattr(trade, "exit_reason", "") or "").upper()
+        # v0.4.16 (user-testing feedback 2026-09-08): a TRAILING_SL exit with
+        # net P&L <= 0 (e.g. fees-only exit where entry==exit fill) must NOT
+        # claim "PROFIT LOCKED" — the old template asserted profit from the
+        # exit REASON alone while the P&L line right below showed red (live:
+        # BPCL closed flat at ₹303.60 yet announced "PROFIT LOCKED -₹61.65").
         if exit_reason == "TRAILING_SL":
-            title = "🔒 TRAILING STOP EXIT — PROFIT LOCKED"
+            if pnl > 0:
+                title = "🔒 TRAILING STOP EXIT — PROFIT LOCKED"
+            elif pnl == 0:
+                title = "🔒 TRAILING STOP EXIT — FLAT"
+            else:
+                title = "🔒 TRAILING STOP EXIT"
         else:
             title = "⛔ STOP LOSS HIT"
         pnl_emoji = "🟢" if pnl >= 0 else "🔴"

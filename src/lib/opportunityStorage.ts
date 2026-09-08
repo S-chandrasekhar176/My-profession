@@ -72,6 +72,14 @@ export function saveStoredExpiredOppId(id: string, reason?: string) {
   if (typeof window === 'undefined') return;
   ensureDateScopedStorage();
   try {
+    // v0.4.16 (user-testing feedback 2026-09-08): a terminal decision wins.
+    // If the user already CONFIRMED or SKIPPED this opportunity, never brand
+    // it expired — that is how the same card ended up in the confirmed list
+    // AND the invalidated/expired list (live: RADICO SELL MRF).
+    const confirmed = getConfirmedIdsLocal();
+    const skipped = getSkippedIdsLocal();
+    if (confirmed.has(id) || skipped.has(id)) return;
+
     const ids = getStoredExpiredOppIds();
     ids.add(id);
     localStorage.setItem(EXPIRED_IDS_KEY, JSON.stringify(Array.from(ids)));
@@ -83,6 +91,45 @@ export function saveStoredExpiredOppId(id: string, reason?: string) {
       localStorage.setItem(EXPIRED_REASONS_KEY, JSON.stringify(reasonsMap));
     }
   } catch {}
+}
+
+/** v0.4.16: remove an id from the expired store (e.g. it was just confirmed).
+ *  Also drops its stored invalidation reason so stale reasons cannot leak
+ *  back into the confirmed card. */
+export function removeStoredExpiredOppId(id: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    const ids = getStoredExpiredOppIds();
+    if (ids.delete(id)) {
+      localStorage.setItem(EXPIRED_IDS_KEY, JSON.stringify(Array.from(ids)));
+    }
+    const rawReasons = localStorage.getItem(EXPIRED_REASONS_KEY);
+    if (rawReasons) {
+      const reasonsMap = JSON.parse(rawReasons);
+      if (reasonsMap && Object.prototype.hasOwnProperty.call(reasonsMap, id)) {
+        delete reasonsMap[id];
+        localStorage.setItem(EXPIRED_REASONS_KEY, JSON.stringify(reasonsMap));
+      }
+    }
+  } catch {}
+}
+
+function getConfirmedIdsLocal(): Set<string> {
+  try {
+    const raw = localStorage.getItem('ultrabot_confirmed_opportunities');
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function getSkippedIdsLocal(): Set<string> {
+  try {
+    const raw = localStorage.getItem('ultrabot_skipped_opportunities');
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
 }
 
 export function getStoredInvalidationReason(id: string): string | undefined {
@@ -107,6 +154,12 @@ export function getStoredOpportunitiesSession(): StoredOpportunity[] | null {
     const marketInfo = getMarketHoursInfo();
 
     return opps.map((opp) => {
+      // v0.4.16: terminal statuses win over the expired store — a confirmed
+      // or skipped card must NEVER be re-branded expired on reload.
+      if (opp.status === 'confirmed' || opp.status === 'skipped') {
+        return opp;
+      }
+
       // If already expired in store
       if (expiredIds.has(opp.id)) {
         return {

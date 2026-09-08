@@ -47,6 +47,13 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import BrokerSettingsSection from '@/components/settings/BrokerSettingsSection';
+import {
+  isDesktopNotificationSupported,
+  getDesktopNotificationPermission,
+  requestDesktopNotificationPermission,
+  isDesktopNotificationEnabled,
+  setDesktopNotificationPref,
+} from '@/lib/desktopNotifications';
 
 // ─────────────────────────────────────────────
 // Types
@@ -102,6 +109,7 @@ interface RiskConfig {
 interface NotificationConfig {
   telegramBotToken: string;
   telegramChatId: string;
+  desktopEnabled: boolean;
   alertTradeExecuted: boolean;
   alertPartialBooking: boolean;
   alertStopLoss: boolean;
@@ -178,6 +186,7 @@ const defaultRisk: RiskConfig = {
 const defaultNotifications: NotificationConfig = {
   telegramBotToken: '',
   telegramChatId: '',
+  desktopEnabled: true,
   alertTradeExecuted: true,
   alertPartialBooking: true,
   alertStopLoss: true,
@@ -217,6 +226,14 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState<NotificationConfig>(defaultNotifications);
   const [capital, setCapital] = useState<CapitalConfig>(defaultCapital);
   const [general, setGeneral] = useState<GeneralConfig>(defaultGeneral);
+
+  // v0.4.16: browser desktop notifications (Web Notification API) — the
+  // third approval surface, combinable with Telegram and the in-dashboard
+  // cards. Permission can only be requested from a user gesture, so the
+  // toggle below drives it.
+  const [desktopNotifOn, setDesktopNotifOn] = useState(false);
+  const [desktopNotifPermission, setDesktopNotifPermission] = useState<string>('default');
+  const [desktopNotifSupported, setDesktopNotifSupported] = useState(true);
 
   // Save loading states per-section
   const [savingRisk, setSavingRisk] = useState(false);
@@ -382,6 +399,7 @@ export default function SettingsPage() {
           alertEngineStatus: res.alert_engine_status ?? prev.alertEngineStatus,
           alertError: res.alert_error ?? prev.alertError,
           alertEODReport: res.alert_eod_report ?? prev.alertEODReport,
+          desktopEnabled: res.desktop_enabled ?? prev.desktopEnabled,
         }));
         setNotifHydrated(true);
       })
@@ -557,6 +575,7 @@ export default function SettingsPage() {
         telegram_enabled: Boolean(notifications.telegramBotToken?.trim() && notifications.telegramChatId?.trim()),
         morning_briefing_time: notifications.morningBriefingTime,
         eod_report_time: notifications.eodReportTime,
+        desktop_enabled: desktopNotifOn,
         alert_trade_executed: notifications.alertTradeExecuted,
         alert_partial_booking: notifications.alertPartialBooking,
         alert_stop_loss: notifications.alertStopLoss,
@@ -577,7 +596,40 @@ export default function SettingsPage() {
     } finally {
       setSavingNotifications(false);
     }
-  }, [notifications]);
+  }, [notifications, desktopNotifOn]);
+
+  // v0.4.16: desktop-notification toggle — requests browser permission on
+  // enable (must run inside this user gesture) and persists the preference.
+  const handleDesktopNotifToggle = useCallback(async (on: boolean) => {
+    if (on) {
+      if (!isDesktopNotificationSupported()) {
+        toast.error('This browser does not support desktop notifications.');
+        return;
+      }
+      const perm = await requestDesktopNotificationPermission();
+      setDesktopNotifPermission(perm);
+      if (perm !== 'granted') {
+        toast.error('Permission not granted — Telegram and in-dashboard approval cards stay active as before.');
+        setDesktopNotifOn(false);
+        setDesktopNotificationPref(false);
+        return;
+      }
+      setDesktopNotificationPref(true);
+      setDesktopNotifOn(true);
+      toast.success('Desktop notifications ON — they now fire ALONGSIDE Telegram (channels are combinable).');
+    } else {
+      setDesktopNotificationPref(false);
+      setDesktopNotifOn(false);
+      toast.info('Desktop notifications off.');
+    }
+  }, []);
+
+  // Reflect current browser permission state on mount
+  useEffect(() => {
+    setDesktopNotifSupported(isDesktopNotificationSupported());
+    setDesktopNotifPermission(getDesktopNotificationPermission());
+    setDesktopNotifOn(isDesktopNotificationEnabled());
+  }, []);
 
   // Helper for number input updates
   // Clamps a risk-limit input to its safe range client-side. The backend's
@@ -1247,6 +1299,49 @@ export default function SettingsPage() {
                     />
                   </div>
                 ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Desktop notifications (browser) — v0.4.16 */}
+          <Card className="bg-ub-surface border-ub-border">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-semibold text-ub-text-primary flex items-center gap-2">
+                <Bell className="h-4 w-4 text-ub-accent" />
+                Desktop Notifications
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="text-sm text-ub-text-primary font-medium">
+                    Browser popups for approvals &amp; fills
+                  </p>
+                  <p className="text-xs text-ub-text-muted">
+                    Fires even when this tab is in the background. Runs
+                    <span className="text-ub-accent font-semibold"> alongside </span>
+                    Telegram — the channels are combinable, not either/or.
+                  </p>
+                  <p className="text-xs text-ub-text-muted">
+                    {desktopNotifSupported ? (
+                      desktopNotifPermission === 'granted' ? (
+                        <span className="text-ub-profit">Permission: granted</span>
+                      ) : desktopNotifPermission === 'denied' ? (
+                        <span className="text-ub-loss">Permission: blocked (reset it in the browser site settings)</span>
+                      ) : (
+                        <span>Permission: not requested yet — enabling asks the browser</span>
+                      )
+                    ) : (
+                      <span className="text-ub-loss">Not supported in this browser</span>
+                    )}
+                  </p>
+                </div>
+                <Switch
+                  checked={desktopNotifOn}
+                  onCheckedChange={handleDesktopNotifToggle}
+                  disabled={!desktopNotifSupported}
+                  className="data-[state=checked]:bg-ub-accent shrink-0"
+                />
               </div>
             </CardContent>
           </Card>
