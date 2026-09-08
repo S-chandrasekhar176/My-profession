@@ -127,15 +127,33 @@ async def lifespan(app: FastAPI):
     # valid Fyers token the wiring is unchanged (Yahoo-only).
     from feeds.fyers_candles import build_fyers_candle_feed
 
+    # v0.4.15 ops lever: the Fyers 1m feed path was implicated in three
+    # silent process deaths on 2026-09-08 (~1-4 min after engine start, flat
+    # RSS, no traceback). market_data.fyers_feed_enabled (gitignored overlay
+    # capable) lets the operator drop to the stable Yahoo-only wiring
+    # WITHOUT touching stored credentials.
+    fyers_feed_enabled = True
+    try:
+        fyers_feed_enabled = bool(
+            (settings._raw_config.get("market_data", {}) or {}).get("fyers_feed_enabled", True)
+        )
+    except Exception:
+        fyers_feed_enabled = True
+
     yahoo_feed = YahooHistoricalFeed()
-    fyers_feed = await build_fyers_candle_feed(repo_getter)
+    fyers_feed = None
+    if fyers_feed_enabled:
+        fyers_feed = await build_fyers_candle_feed(repo_getter)
     if fyers_feed is not None:
         feed_manager = FeedManager(primary=fyers_feed, backup=yahoo_feed)
         logger.info("FeedManager: primary=Fyers 1m Realtime, backup=Yahoo")
-    else:
+    elif not fyers_feed_enabled:
         # v0.4.15: log the fallback branch too — a silent Yahoo-only boot was
         # indistinguishable from the Fyers boot in the run log during the
         # 2026-09-08 incident triage.
+        logger.info("FeedManager: primary=Yahoo (fyers_feed_enabled=false via config), backup=None")
+        feed_manager = FeedManager(primary=yahoo_feed, backup=None)
+    else:
         logger.info("FeedManager: primary=Yahoo (no valid Fyers token at boot), backup=None")
         feed_manager = FeedManager(primary=yahoo_feed, backup=None)
 

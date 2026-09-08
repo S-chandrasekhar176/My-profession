@@ -37,12 +37,12 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 # How long a fetched candle set stays fresh enough to serve from cache.
-_CACHE_TTL_SECONDS = 20.0
+_CACHE_TTL_SECONDS = 60.0
 # Consecutive empty results before rebuilding the broker client from DB creds.
 _EMPTY_RESULTS_BEFORE_REBUILD = 2
 # Candle history window (calendar days). A 100-bar 5m request needs ~500
 # 1m bars ≈ 1.5 trading days; 5 calendar days covers holidays comfortably.
-_HISTORY_WINDOW_DAYS = 5
+_HISTORY_WINDOW_DAYS = 2
 
 # Engine/plain symbols → Fyers instruments.
 _INDEX_MAP = {
