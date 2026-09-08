@@ -214,11 +214,12 @@ fees:
   stamp_duty_pct: 3.0e-05
 notifications:
   telegram_enabled: true
-  # v0.4.10: PRIVATE bot (BotFather @chandu_ultrabot_bot, owner chat 5284252833).
-  # The previous token belonged to a third-party tool whose server consumed
-  # getUpdates (button taps never reached us) - retired for interactive use.
-  telegram_bot_token: 8959315649:AAEBZufqy1RpOGqkyz3L-NCJssGeL80R95U
-  telegram_chat_id: '5284252833'
+  # SECURITY (v0.4.13.1): bot token + chat id are secrets. They live ONLY in
+  # the gitignored defaults.local.yaml overlay (or the encrypted Settings
+  # store). This tracked file must never carry them again - the v0.4.10-era
+  # values were public in repo history and have been rotated at BotFather.
+  telegram_bot_token: ''
+  telegram_chat_id: ''
   # v0.4.10: two-way interactive Telegram
   telegram_interactive_enabled: true
   telegram_canary_enabled: true
