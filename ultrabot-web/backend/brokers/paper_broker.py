@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -6,6 +7,8 @@ from brokers.base import BaseBroker
 from fees.nse_fee_calculator import NSEFeeCalculator
 from fees.slippage import apply_slippage
 from utils.market_utils import get_lot_size
+
+logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -374,6 +377,74 @@ class PaperBroker(BaseBroker):
                 "unrealized_pnl": pos["unrealized_pnl"],
             })
         return updated
+
+    async def rehydrate_positions(self, rows: List[Dict[str, Any]]) -> int:
+        """v0.4.13 rehydration fix: seed the in-memory book from DB truth.
+
+        A process restart creates a FRESH PaperBroker whose position book
+        is empty while the DB still holds the open positions (live incident
+        2026-09-07 09:42 IST: 3 open positions, save_state then persisted 0,
+        destroying the session snapshot). This restores each OPEN position
+        and mirrors the accounting the original BUY leg performed
+        (``capital -= invested + entry fees``) so get_margin()/available
+        stay identical to a no-restart session. Positions already open in
+        the book (same symbol) are skipped; the DB row stays the source of
+        truth for id/entry_price/quantity.
+        """
+        restored = 0
+        for row in rows or []:
+            try:
+                symbol = str(row.get("symbol") or "").strip()
+                qty = int(row.get("quantity") or 0)
+                entry = float(row.get("entry_price") or 0.0)
+                if not symbol or qty <= 0 or entry <= 0:
+                    continue
+                existing = self.positions.get(symbol)
+                if existing and existing.get("status") == "OPEN":
+                    continue
+                raw_dir = str(row.get("direction") or "LONG").upper()
+                direction = "SHORT" if raw_dir in ("SHORT", "SELL") else "LONG"
+                fees_paid = float(row.get("fees_paid") or 0.0)
+                invested = round(entry * qty, 2)
+                try:
+                    current = float(row.get("current_price") or 0.0)
+                except (TypeError, ValueError):
+                    current = 0.0
+                self.positions[symbol] = {
+                    "id": str(row.get("id") or f"pos-rehyd-{symbol}"),
+                    "symbol": symbol,
+                    "exchange": str(row.get("exchange") or "NSE"),
+                    "direction": direction,
+                    "quantity": qty,
+                    "entry_price": round(entry, 2),
+                    "current_price": round(current, 2) if current > 0 else round(entry, 2),
+                    "invested_amount": invested,
+                    "status": "OPEN",
+                    "entry_time": str(row.get("entry_time") or self._ist_now()),
+                    "product": str(row.get("product") or "MIS"),
+                    "segment": str(row.get("segment") or "EQ"),
+                    "fees_paid": fees_paid,
+                    "unrealized_pnl": 0.0,
+                }
+                # Mirror the original BUY leg's capital movement (SELL/SHORT
+                # opens credit capital at entry; account identically so the
+                # close leg's add-back stays consistent).
+                if direction == "LONG":
+                    self.capital -= (invested + fees_paid)
+                else:
+                    self.capital += (invested - fees_paid)
+                restored += 1
+            except Exception as row_exc:
+                logger.warning(
+                    "PaperBroker rehydration skipped a row (%s): %s",
+                    row.get("symbol", "?"), row_exc,
+                )
+        if restored:
+            logger.info(
+                "PaperBroker rehydrated %d open position(s) from DB; available capital now Rs %.2f",
+                restored, self.capital,
+            )
+        return restored
 
     async def cancel_order(self, order_id: str) -> Dict[str, Any]:
         if order_id not in self.orders:

@@ -466,6 +466,54 @@ class UltraBotEngine:
                     )
                 except Exception as exc:
                     logger.warning("Could not recover state for same-day session %s: %s", self.session_id, exc)
+
+                # ----------------------------------------------------------
+                # v0.4.13 rehydration fix (live incident 2026-09-07 09:42 IST:
+                # restart with 3 open positions -> the next save_state
+                # persisted 0 positions, destroying the session snapshot).
+                # recover_state above restores only scalar session fields;
+                # the paper broker's in-memory book stays empty after a
+                # restart, and save_state() reads broker.get_positions().
+                # Seed the book from the DB ledger (source of truth) so the
+                # broker book, capital math and every subsequent state
+                # snapshot stay truthful. Live brokers keep positions
+                # server-side — paper mode only.
+                # ----------------------------------------------------------
+                if self.mode == "paper" and self.broker is not None and hasattr(
+                    self.broker, "rehydrate_positions"
+                ):
+                    try:
+                        async with self._repo_context() as repo:
+                            if repo is not None and hasattr(repo, "get_open_positions"):
+                                _open_rows = await repo.get_open_positions()
+                                _rows = [
+                                    {
+                                        "id": getattr(r, "id", None),
+                                        "symbol": getattr(r, "symbol", ""),
+                                        "exchange": getattr(r, "exchange", "NSE"),
+                                        "direction": getattr(r, "direction", "LONG"),
+                                        "quantity": getattr(r, "quantity", 0),
+                                        "entry_price": getattr(r, "entry_price", 0.0),
+                                        "current_price": getattr(r, "current_price", 0.0),
+                                        "invested_amount": getattr(r, "invested_amount", 0.0),
+                                        "entry_time": getattr(r, "entry_time", None),
+                                        "product": getattr(r, "product", "MIS"),
+                                        "segment": getattr(r, "segment", "EQ"),
+                                        "fees_paid": getattr(r, "fees_paid", 0.0),
+                                    }
+                                    for r in (_open_rows or [])
+                                ]
+                                if _rows:
+                                    _n = await self.broker.rehydrate_positions(_rows)
+                                    if _n:
+                                        logger.info(
+                                            "Rehydrated %d open position(s) into the paper broker from DB (same-day resume)",
+                                            _n,
+                                        )
+                    except Exception as reh_exc:
+                        logger.warning(
+                            "Paper broker position rehydration failed: %s", reh_exc, exc_info=True
+                        )
             else:
                 # Genuinely new trading day session (or fresh session after mode switch)
                 if initial_capital is not None:
@@ -581,6 +629,27 @@ class UltraBotEngine:
             self._trades_executed = 0
             self._errors_count = 0
             self._start_time = datetime.now(IST)
+
+            if same_day_session is not None:
+                # v0.4.13: counter restore (live incident 09:42 IST — /status
+                # showed Trades 0 with 3 DB trades after the restart). The
+                # trade counter restarts at 0 above; restore today's executed
+                # count from the DB ledger. Scan/signal counters have no
+                # per-event DB ledger and honestly restart from zero.
+                try:
+                    async with self._repo_context() as repo:
+                        if repo is not None and hasattr(repo, "get_trades_by_date"):
+                            _todays_trades = await repo.get_trades_by_date(
+                                datetime.now(IST).date().isoformat(), limit=1000
+                            )
+                            self._trades_executed = len(_todays_trades or [])
+                            if self._trades_executed:
+                                logger.info(
+                                    "Restored trades counter from DB: %d executed trade(s) today",
+                                    self._trades_executed,
+                                )
+                except Exception as cnt_exc:
+                    logger.warning("Could not restore trades counter from DB: %s", cnt_exc)
 
             if same_day_session is None:
                 # Genuinely new trading day: reset daily opportunities and telemetry
@@ -1844,6 +1913,63 @@ class UltraBotEngine:
 
                 # Calculate position size
                 sizing = await self._calculate_position_size(signal, current_price, segment="EQ")
+
+                # ----------------------------------------------------------
+                # v0.4.13: sizing pre-check (G20_Sizing). A zero/negative
+                # sized quantity must never become an opportunity card — the
+                # confirm path rejects "Position size calculated as 0" only
+                # AFTER the user has tapped Approve (live incident 2026-09-07
+                # 11:26 IST: BOSCHLTD @ Rs 47.9k vs per-trade capital ->
+                # qty 0). Runs BEFORE the G17 actual-size re-check, which
+                # requires qty > 0 to be meaningful. Truthful bookkeeping
+                # mirrors the G17 rejection path, and the block is recorded
+                # as a gate-blocked shadow sample (consistent with G1).
+                # ----------------------------------------------------------
+                _sized_qty = int((sizing or {}).get("quantity") or 0)
+                if _sized_qty <= 0:
+                    _sizing_reason = (
+                        f"Position sizing returned {_sized_qty} qty at entry ₹{float(current_price or 0):,.2f} "
+                        f"(per-trade capital / Kelly budget) — not tradeable; blocked before the opportunity card."
+                    )
+                    logger.info(
+                        "Signal from %s on %s blocked by sizing pre-check: %s",
+                        strategy_name, symbol, _sizing_reason,
+                    )
+                    if self._signals_passed_count > 0:
+                        self._signals_passed_count -= 1
+                    self._signals_rejected_count += 1
+                    self._rejections_by_gate["G20_Sizing"] = (
+                        self._rejections_by_gate.get("G20_Sizing", 0) + 1
+                    )
+                    self._rejections_by_strategy[strategy_name] = (
+                        self._rejections_by_strategy.get(strategy_name, 0) + 1
+                    )
+                    self._record_telemetry_event(
+                        symbol=symbol,
+                        strategy=strategy_name,
+                        status="REJECTED",
+                        direction=signal.get("direction", "—"),
+                        price=current_price,
+                        confidence=float(signal.get("confidence", 0.0)),
+                        gate="G20_Sizing",
+                        reason=_sizing_reason,
+                    )
+                    self._register_shadow(
+                        signal_id=None,
+                        symbol=symbol,
+                        direction=signal.get("direction", "LONG"),
+                        strategy=strategy_name,
+                        entry_price=signal.get("entry_price") or current_price,
+                        stop_loss=signal.get("sl_price") or 0.0,
+                        target=signal.get("target_price") or 0.0,
+                        kind=KIND_GATE_BLOCKED,
+                        never_traded_reason="GATE_BLOCKED",
+                        blocking_gates=["G20_Sizing"],
+                        signal_data=signal,
+                        regime=self.current_regime,
+                        vix=self.vix,
+                    )
+                    continue
 
                 # ----------------------------------------------------------
                 # CORRECTION (live-market validation run 2, 2026-08-28):

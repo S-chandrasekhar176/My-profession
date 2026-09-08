@@ -340,3 +340,15 @@ strategy_activation:
       PTC: 0.0
       VC: 0.0
       MRF: 0.0
+
+# ── v0.4.13 M2: periodic DB backups + handoff exports ──────────────
+# In-process asyncio job (survivable + observable, unlike the external
+# cron that died silently on Sep 4). Snapshots use the SQLite online
+# backup API — consistent while the engine keeps writing (WAL-safe).
+persistence:
+  enabled: true
+  snapshot_interval_minutes: 15
+  keep_snapshots: 32          # newest N kept in snapshot_dir
+  eod_time: "15:35"           # IST; "" disables the EOD copy
+  snapshot_dir: ""            # empty -> auto: <repo parent>/persist/snapshots
+  eod_dir: ""                 # empty -> same as snapshot_dir
