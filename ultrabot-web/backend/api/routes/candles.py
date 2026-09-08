@@ -95,7 +95,17 @@ def _to_yahoo_ticker(sym: str) -> str:
 
 
 def _fetch_realtime_quotes_sync(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Fetch 100% real-time market quotes via Yahoo Finance for given symbols."""
+    """Fetch near-real-time market quotes via Yahoo Finance for given symbols.
+
+    v0.4.16 (user-testing feedback 2026-09-08): the previous version pulled
+    DAILY bars (period=5d, interval=1d) and reported the last daily CLOSE as
+    the "realtime" price — during a live session SENSEX/MIDCPNIFTY/FINNIFTY
+    showed a value that could be ~24h stale and the change/direction was vs
+    the PREVIOUS session, so the header banner disagreed with the live tape.
+    Now: 15-minute intraday bars for the last 5 sessions — the price is the
+    latest intraday close and the change is vs the PREVIOUS SESSION's close.
+    Yahoo NSE quotes are delayed up to ~15 min; the source label says so.
+    """
     import yfinance as yf
 
     if not symbols:
@@ -109,7 +119,7 @@ def _fetch_realtime_quotes_sync(symbols: List[str]) -> Dict[str, Dict[str, Any]]
         df = yf.download(
             tickers=" ".join(unique_tickers),
             period="5d",
-            interval="1d",
+            interval="15m",
             group_by="ticker",
             progress=False,
             timeout=10,
@@ -119,27 +129,32 @@ def _fetch_realtime_quotes_sync(symbols: List[str]) -> Dict[str, Dict[str, Any]]
             try:
                 sub = df[y_sym] if len(unique_tickers) > 1 else df
                 sub = sub.dropna(subset=["Close"])
-                if len(sub) >= 2:
-                    latest = float(sub["Close"].iloc[-1])
-                    prev = float(sub["Close"].iloc[-2])
-                    change = round(latest - prev, 2)
-                    change_pct = round((change / prev) * 100, 2) if prev > 0 else 0.0
-                    quotes[orig] = {
-                        "price": round(latest, 2),
-                        "change": change,
-                        "changePct": change_pct,
-                        "previousClose": round(prev, 2),
-                        "source": "Yahoo Realtime Feed",
-                    }
-                elif len(sub) == 1:
-                    latest = float(sub["Close"].iloc[-1])
-                    quotes[orig] = {
-                        "price": round(latest, 2),
-                        "change": 0.0,
-                        "changePct": 0.0,
-                        "previousClose": round(latest, 2),
-                        "source": "Yahoo Realtime Feed",
-                    }
+                if sub.empty:
+                    continue
+                latest = float(sub["Close"].iloc[-1])
+
+                # Previous SESSION close = last intraday close strictly before
+                # the latest bar's calendar day (the last 15m bar of the
+                # previous session is effectively that day's close).
+                prev = latest
+                try:
+                    idx_dates = sub.index.date
+                    last_day = idx_dates[-1]
+                    hist = sub[[d < last_day for d in idx_dates]]
+                    if len(hist):
+                        prev = float(hist["Close"].iloc[-1])
+                except Exception:
+                    prev = latest
+
+                change = round(latest - prev, 2)
+                change_pct = round((change / prev) * 100, 2) if prev > 0 else 0.0
+                quotes[orig] = {
+                    "price": round(latest, 2),
+                    "change": change,
+                    "changePct": change_pct,
+                    "previousClose": round(prev, 2),
+                    "source": "Yahoo (15m delayed)",
+                }
             except Exception as parse_err:
                 logger.debug("Could not parse sub dataframe for %s (%s): %s", orig, y_sym, parse_err)
     except Exception as exc:
@@ -192,14 +207,24 @@ async def get_live_quotes(
     for sym in sym_list:
         clean = sym.replace(".NS", "").replace("^", "")
         # Check special engine indices
+        # v0.4.16 (user-testing feedback 2026-09-08): engine.nifty_change is a
+        # PERCENT, but the old response wrote it into BOTH `change` (points)
+        # and `changePct` — the banner showed e.g. "−0.14 pts / −0.14%" while
+        # the real move was −23 pts. Derive points from the percentage.
         if clean in ("NIFTY", "NIFTY50") and engine and getattr(engine, "nifty_price", 0) > 0:
+            _nifty_price = round(float(engine.nifty_price), 2)
+            _nifty_pct = float(getattr(engine, "nifty_change", 0.0) or 0.0)
+            _denom = 1.0 + _nifty_pct / 100.0
+            _nifty_prev = (_nifty_price / _denom) if _denom else _nifty_price
             results[clean] = {
-                "price": round(engine.nifty_price, 2),
-                "change": round(getattr(engine, "nifty_change", 0.0), 2),
-                "changePct": round(getattr(engine, "nifty_change", 0.0), 2),
+                "price": _nifty_price,
+                "change": round(_nifty_price - _nifty_prev, 2),
+                "changePct": round(_nifty_pct, 2),
                 "source": f"{active_broker.capitalize()}",
             }
             continue
+        # BANKNIFTY/VIX have no engine-side change figure — 0.0 renders as a
+        # neutral "—" on the banner rather than a fabricated direction.
         if clean in ("BANKNIFTY", "NIFTYBANK") and engine and getattr(engine, "banknifty_price", 0) > 0:
             results[clean] = {
                 "price": round(engine.banknifty_price, 2),

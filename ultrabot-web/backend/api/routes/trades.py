@@ -21,6 +21,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["trades", "positions"])
 
 
+async def _reconcile_closed_trade_pnl(repo: Repository, trade) -> None:
+    """v0.4.16 (user-testing feedback 2026-09-08): self-heal inconsistent
+    CLOSED trade rows.
+
+    Live evidence (BPCL, 2026-09-08): the row carried gross pnl=₹0.00,
+    fees=₹81.65 but net_pnl=−₹61.65 — net did NOT equal gross−fees because a
+    legacy/parallel close path mixed the entry-time fee ESTIMATE into net
+    while the fees column held the final NSE-calculator figure. Every surface
+    (trade table, dashboard Today's P&L, EOD sums) then disagreed by ₹20.
+
+    Rule: for CLOSED rows, net_pnl must equal pnl − fees. On mismatch > ₹0.01
+    the row is corrected (persisted) once and a warning is logged with the
+    delta so the root-cause writer can be identified from logs.
+    """
+    try:
+        if getattr(trade, "status", "") != "CLOSED":
+            return
+        gross = float(getattr(trade, "pnl", 0.0) or 0.0)
+        fees = float(getattr(trade, "fees", 0.0) or 0.0)
+        net = getattr(trade, "net_pnl", None)
+        expected = round(gross - fees, 2)
+        if net is not None and abs(float(net) - expected) <= 0.01:
+            return
+        old_net = float(net) if net is not None else None
+        await repo.update_trade(trade.id, net_pnl=expected)
+        trade.net_pnl = expected
+        logger.warning(
+            "PnL reconciliation: trade %s (%s) net_pnl %s -> %s (gross %s - fees %s); "
+            "row was written inconsistently by a close path",
+            trade.id, getattr(trade, "symbol", "?"), old_net, expected, gross, fees,
+        )
+    except Exception:  # never let healing break reads
+        logger.debug("PnL reconciliation skipped for trade %s", getattr(trade, "id", "?"), exc_info=True)
+
+
 # ────────────────────────────────────────
 # Trade History
 # ────────────────────────────────────────
@@ -46,6 +81,9 @@ async def get_trades(
             trades = await repo.get_trades_by_strategy(strategy, limit=limit)
         else:
             trades = await repo.get_trades(limit=limit, offset=offset)
+
+        for t in trades:
+            await _reconcile_closed_trade_pnl(repo, t)
 
         return [TradeResponse.model_validate(t) for t in trades]
     except HTTPException:
@@ -116,6 +154,8 @@ async def get_trade_detail(
                 holding_duration = " ".join(parts)
             except (ValueError, TypeError):
                 holding_duration = None
+
+        await _reconcile_closed_trade_pnl(repo, trade)
 
         detail = TradeDetailResponse(
             id=trade.id,
@@ -251,7 +291,47 @@ async def close_position(
                     qty = int(trade.quantity or position.quantity or 1)
                     direction = str(trade.direction or position.direction or "BUY").upper()
                     pnl = (exit_price - entry) * qty if direction in ("BUY", "LONG") else (entry - exit_price) * qty
-                    fees = float(trade.fees or trade.brokerage or 40.0)
+                    # v0.4.16 (user-testing feedback 2026-09-08): the previous
+                    # fallback kept the ENTRY-TIME fee ESTIMATE and only wrote
+                    # pnl/net — net = pnl − estimate while the row's `fees`
+                    # column held a different (final) figure. That mixed write
+                    # is exactly the "PnL differs between surfaces" class
+                    # (live: BPCL net −₹61.65 vs fees ₹81.65). Compute the
+                    # full round trip with the canonical NSE calculator — the
+                    # same model engine._close_position uses — and persist
+                    # pnl, fees AND net from one source.
+                    fees = 0.0
+                    if entry > 0 and qty > 0:
+                        try:
+                            from fees.nse_fee_calculator import NSEFeeCalculator
+
+                            fees_config = {}
+                            try:
+                                from config.settings import settings as _settings
+
+                                fees_config = _settings.get_fees_config() or {}
+                            except Exception:
+                                fees_config = {}
+                            _brokerage = float(fees_config.get("brokerage_per_order", 20.0))
+                            _is_long = direction in ("BUY", "LONG")
+                            fees = float(
+                                NSEFeeCalculator(brokerage_per_order=_brokerage)
+                                .calculate_equity_intraday(
+                                    buy_price=entry if _is_long else exit_price,
+                                    sell_price=exit_price if _is_long else entry,
+                                    quantity=qty,
+                                    brokerage_per_order=_brokerage,
+                                )
+                                .get("total", 0.0)
+                            )
+                        except Exception as fee_exc:
+                            logger.warning(
+                                "Manual close: NSE fee calc failed for trade %s (%s) — keeping entry estimate",
+                                position.trade_id, fee_exc,
+                            )
+                            fees = float(trade.fees or trade.brokerage or 40.0)
+                    else:
+                        fees = float(trade.fees or trade.brokerage or 40.0)
                     net_pnl = pnl - fees
 
                     await repo.update_trade(
@@ -261,6 +341,7 @@ async def close_position(
                         exit_reason=exit_reason,
                         exit_time=ist_now,
                         pnl=round(pnl, 2),
+                        fees=round(fees, 2),
                         net_pnl=round(net_pnl, 2),
                     )
 
