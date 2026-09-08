@@ -8,6 +8,7 @@ import { getMarketHoursInfo, type MarketHoursInfo } from '@/lib/marketHours';
 import {
   getStoredExpiredOppIds,
   saveStoredExpiredOppId,
+  removeStoredExpiredOppId,
   getStoredOpportunitiesSession,
   saveStoredOpportunitiesSession,
   clearStoredOpportunitiesSession,
@@ -1189,6 +1190,12 @@ export default function OpportunitiesPage() {
   }, [opportunities, rejectedList, expiredList]);
 
   const isOppExpired = useCallback((o: OpportunityData) => {
+    // v0.4.16 (user-testing feedback 2026-09-08): terminal decisions win.
+    // A confirmed/skipped card whose TTL has elapsed (or that carries a stale
+    // invalidation reason) must NOT be re-branded expired — that is exactly
+    // how the same RADICO SELL MRF card appeared in BOTH the confirmed and
+    // the invalidated/expired lists.
+    if (o.status === 'confirmed' || o.status === 'skipped') return false;
     return o.status === 'expired' || Boolean(o.invalidationReason) || (o.expiryAt ? new Date(o.expiryAt).getTime() <= currentTime : false);
   }, [currentTime]);
 
@@ -1197,13 +1204,23 @@ export default function OpportunitiesPage() {
     if (activeTab === 'actionable' || activeTab === 'pending') {
       list = opportunities.filter((o) => o.status === 'pending' && !isOppExpired(o));
     } else if (activeTab === 'expired') {
-      const fromOpp = opportunities.filter((o) => isOppExpired(o)).map((o) => ({
+      // v0.4.16: exclude terminal states — confirmed/skipped cards never
+      // belong in the invalidated/expired list even if their TTL elapsed.
+      const fromOpp = opportunities.filter((o) => o.status !== 'confirmed' && o.status !== 'skipped' && isOppExpired(o)).map((o) => ({
         ...o,
         status: 'expired' as OppStatus,
         invalidationReason: o.invalidationReason || 'Setup TTL expired (15m momentum window elapsed) — opportunity invalidated to prevent stale execution',
       }));
+      const confirmedSkipped = new Set([
+        ...getConfirmedOppIds(),
+        ...getSkippedOppIds(),
+        ...opportunities.filter((o) => o.status === 'confirmed' || o.status === 'skipped').map((o) => o.id),
+      ]);
       const seenIds = new Set(fromOpp.map((o) => o.id));
-      list = [...fromOpp, ...expiredList.filter((e) => !seenIds.has(e.id))];
+      list = [
+        ...fromOpp,
+        ...expiredList.filter((e) => !seenIds.has(e.id) && !confirmedSkipped.has(e.id) && e.status !== 'confirmed' && e.status !== 'skipped'),
+      ];
     } else if (activeTab === 'all') {
       list = allList;
     } else if (activeTab === 'rejected') {
@@ -1220,7 +1237,8 @@ export default function OpportunitiesPage() {
   }, [opportunities, rejectedList, expiredList, allList, activeTab, searchQuery, isOppExpired]);
 
   const actionableCount = opportunities.filter((o) => o.status === 'pending' && !isOppExpired(o)).length;
-  const expiredCount = expiredList.length + opportunities.filter((o) => isOppExpired(o)).length;
+  const expiredCount = expiredList.filter((e) => e.status !== 'confirmed' && e.status !== 'skipped').length
+    + opportunities.filter((o) => o.status !== 'confirmed' && o.status !== 'skipped' && isOppExpired(o)).length;
   const confirmedCount = opportunities.filter((o) => o.status === 'confirmed').length;
   const skippedCount = opportunities.filter((o) => o.status === 'skipped').length;
   const rejectedCount = rejectedList.length;
@@ -1247,8 +1265,12 @@ export default function OpportunitiesPage() {
 
       if (status === 'filled') {
         addConfirmedOppId(id);
+        // v0.4.16: purge any stale expired branding for this id — the
+        // terminal decision (confirmed) must win everywhere.
+        removeStoredExpiredOppId(id);
+        setExpiredList((prev) => prev.filter((e) => e.id !== id));
         setOpportunities((prev) =>
-          prev.map((o) => (o.id === id ? { ...o, status: 'confirmed' as OppStatus } : o))
+          prev.map((o) => (o.id === id ? { ...o, status: 'confirmed' as OppStatus, invalidationReason: undefined } : o))
         );
         toast.success(
           `${result.symbol} ${result.direction} × ${result.quantity} filled @ ${INR(result.filled_price)} (SL ${INR(result.stop_loss)}, TGT ${INR(result.target)}) — managed by engine.`
@@ -1275,8 +1297,11 @@ export default function OpportunitiesPage() {
 
   const handleSkip = useCallback(async (id: string) => {
     addSkippedOppId(id);
+    // v0.4.16: terminal decision (skipped) wins — purge stale expired state.
+    removeStoredExpiredOppId(id);
+    setExpiredList((prev) => prev.filter((e) => e.id !== id));
     setOpportunities((prev) =>
-      prev.map((o) => (o.id === id ? { ...o, status: 'skipped' as OppStatus } : o))
+      prev.map((o) => (o.id === id ? { ...o, status: 'skipped' as OppStatus, invalidationReason: undefined } : o))
     );
     try {
       await skipOpportunity(id);

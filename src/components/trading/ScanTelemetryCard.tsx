@@ -305,6 +305,10 @@ export default function ScanTelemetryCard({ engineState = 'stopped', activeBroke
                 {filteredEvents.map((ev, idx) => {
                   const isPassed = ev.status === 'PASSED';
                   const isRejected = ev.status === 'REJECTED';
+                  // v0.4.16: terminal "card exists" event — renders green so
+                  // "ALL_GATES_PASSED but no card" cases are instantly
+                  // distinguishable in the timeline (SHREECEM 2026-09-08).
+                  const isOpportunityCreated = ev.status === 'OPPORTUNITY_CREATED';
                   const isBuy = ev.direction === 'BUY';
 
                   return (
@@ -321,6 +325,8 @@ export default function ScanTelemetryCard({ engineState = 'stopped', activeBroke
                           <CheckCircle2 size={15} className="text-ub-profit shrink-0 mt-0.5 sm:mt-0" />
                         ) : isRejected ? (
                           <XCircle size={15} className="text-ub-loss shrink-0 mt-0.5 sm:mt-0" />
+                        ) : isOpportunityCreated ? (
+                          <CheckCircle2 size={15} className="text-ub-accent shrink-0 mt-0.5 sm:mt-0" />
                         ) : (
                           <AlertCircle size={15} className="text-ub-text-disabled shrink-0 mt-0.5 sm:mt-0" />
                         )}
@@ -353,9 +359,11 @@ export default function ScanTelemetryCard({ engineState = 'stopped', activeBroke
                           <Badge
                             variant="outline"
                             className={`text-[10px] font-mono px-1.5 py-0 ${
-                              isPassed
-                                ? 'border-ub-profit/30 text-ub-profit bg-ub-profit/5'
-                                : 'border-ub-loss/30 text-ub-loss bg-ub-loss/5'
+                              isOpportunityCreated
+                                ? 'border-ub-accent/40 text-ub-accent bg-ub-accent/5'
+                                : isPassed
+                                  ? 'border-ub-profit/30 text-ub-profit bg-ub-profit/5'
+                                  : 'border-ub-loss/30 text-ub-loss bg-ub-loss/5'
                             }`}
                           >
                             {ev.gate}
@@ -363,7 +371,9 @@ export default function ScanTelemetryCard({ engineState = 'stopped', activeBroke
                         )}
                         <span
                           className={`text-[11px] truncate max-w-md sm:max-w-xl xl:max-w-3xl ${
-                            isPassed
+                            isOpportunityCreated
+                              ? 'text-ub-accent font-medium'
+                              : isPassed
                               ? 'text-ub-profit font-medium'
                               : isRejected
                               ? 'text-ub-loss'

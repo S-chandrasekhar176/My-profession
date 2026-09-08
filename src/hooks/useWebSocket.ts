@@ -4,6 +4,12 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { wsManager } from '@/lib/ws';
 import { useStore } from '@/lib/store';
 import type { LivePrice, Opportunity } from '@/lib/store';
+import {
+  notifyNewOpportunity,
+  notifyTradeFill,
+} from '@/lib/desktopNotifications';
+import { addConfirmedOppId } from '@/lib/tradeExecution';
+import { removeStoredExpiredOppId } from '@/lib/opportunityStorage';
 
 interface UseWebSocketOptions {
   autoConnect?: boolean;
@@ -60,13 +66,39 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
         }
       } else if (data.type === 'new_opportunity' && data.opportunity) {
         store.realtime.addOpportunity(data.opportunity);
+        // v0.4.16: true desktop popup — combinable with the Telegram card
+        // (independent channels; both fire from the same backend event).
+        notifyNewOpportunity(data.opportunity);
       } else if (data.id && (data.symbol || data.entry_price || data.entry)) {
         store.realtime.addOpportunity(data);
+        notifyNewOpportunity(data);
       }
     };
 
     const unsubOpps1 = wsManager.on('new_opportunity', handleOpportunity);
     const unsubOpps2 = wsManager.on('opportunity', handleOpportunity);
+
+    // v0.4.16 (user-testing feedback 2026-09-08): a fill that was APPROVED
+    // FROM TELEGRAM previously never reached the browser's localStorage —
+    // the dashboard kept showing the executed opportunity as pending until
+    // it decayed to "expired". The backend now includes opportunity_id in
+    // the trade_fill payload; mark the card confirmed cross-channel.
+    const handleTrade = (data: any) => {
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'trade_fill') {
+        const oppId = data.opportunity_id;
+        if (oppId) {
+          try {
+            addConfirmedOppId(String(oppId));
+            removeStoredExpiredOppId(String(oppId));
+          } catch {}
+          useStore.getState().realtime.removeOpportunity(String(oppId));
+        }
+        notifyTradeFill(data);
+      }
+    };
+    const unsubTrade = wsManager.on('trade', handleTrade);
+    const unsubTradeFill = wsManager.on('trade_fill', handleTrade);
 
     // Dispatch engine status updates to store.
     // NOTE: the backend message envelope carries the ORIGINAL engine channel
@@ -186,6 +218,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
       unsubPrices();
       unsubOpps1();
       unsubOpps2();
+      unsubTrade();
+      unsubTradeFill();
       unsubEngine();
       unsubEngineAlias();
       unsubTelemetry();

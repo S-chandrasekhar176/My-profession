@@ -110,6 +110,7 @@ interface HistoricalTrade {
   strategy: string;
   entry: number;
   exit: number;
+  stopLoss: number;
   quantity: number;
   grossPnl: number;
   fees: number;
@@ -647,9 +648,14 @@ function HistoryTab({
         strategy: t.strategy || '—',
         entry: t.entry_price || t.entry,
         exit: t.exit_price || t.exit || t.entry_price,
+        stopLoss: t.stop_loss || 0,
         quantity: t.quantity,
         grossPnl: t.pnl || 0,
-        fees: (t.fees || 0) + (t.brokerage || 0),
+        // v0.4.16 (user-testing feedback 2026-09-08): the close path already
+        // writes the FULL round-trip fee (both brokerage legs) into `fees` —
+        // adding `brokerage` again double-counted ₹20-40 per row, so the
+        // history table showed gross − fees ≠ net.
+        fees: t.fees || 0,
         netPnl: t.net_pnl || 0,
         duration: t.holding_duration || 'Intraday',
         exitReason: t.exit_reason || 'MANUAL',
@@ -968,8 +974,15 @@ function HistoryTab({
                             symbol: trade.symbol,
                             direction: trade.direction,
                             entry: trade.entry,
-                            stopLoss: +(trade.entry * (trade.direction === 'BUY' ? 0.985 : 1.015)).toFixed(2),
+                            // v0.4.16: real persisted SL from the trade row
+                            // (fall back to the old ±1.5% approximation only
+                            // when the row carries none).
+                            stopLoss: trade.stopLoss > 0
+                              ? trade.stopLoss
+                              : +(trade.entry * (trade.direction === 'BUY' ? 0.985 : 1.015)).toFixed(2),
                             target: trade.exit,
+                            // v0.4.16: explicit EXIT line at the real fill.
+                            exitPrice: trade.exit,
                             quantity: trade.quantity,
                             pnl: trade.netPnl,
                             strategy: trade.strategy || 'Historical Strategy',

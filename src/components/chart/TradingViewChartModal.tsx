@@ -31,6 +31,7 @@ import {
   CheckCircle2,
   Maximize2,
   Minimize2,
+  AlertTriangle,
 } from 'lucide-react';
 
 export interface ChartTradeData {
@@ -49,6 +50,9 @@ export interface ChartTradeData {
   pnl?: number;
   status?: string;
   broker?: string;
+  // v0.4.16: filled exit price for CLOSED trades — renders an EXIT line so
+  // the chart shows where the round trip actually ended.
+  exitPrice?: number;
   // Options specific fields
   segment?: string;
   strike?: number;
@@ -79,6 +83,16 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [chartData, setChartData] = useState<any>(null);
   const [currentLtp, setCurrentLtp] = useState<number>(0);
+  // v0.4.16 (user-testing feedback 2026-09-08): a failed/empty candle fetch
+  // used to leave the modal silently showing only the horizontal level
+  // lines — the user could not tell price movement at all. Surface the
+  // failure honestly with a retry.
+  const [candleError, setCandleError] = useState<string | null>(null);
+  // Live-tick plumbing: keep the candle series + LTP price line outside the
+  // render effect so the 3s poll can update them WITHOUT rebuilding the chart.
+  const candleSeriesRef = useRef<any>(null);
+  const ltpLineRef = useRef<any>(null);
+  const lastCandleRef = useRef<{ time: Time; open: number; high: number; low: number; close: number } | null>(null);
 
   // Fetch real candles from /api/candles
   const fetchCandles = useCallback(async () => {
@@ -93,10 +107,21 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
         if (json.success && Array.isArray(json.candles) && json.candles.length > 0) {
           setChartData(json);
           setCurrentLtp(json.currentPrice || trade.entry);
+          setCandleError(null);
+        } else {
+          setChartData(null);
+          setCandleError(
+            json.message || `No ${timeframe} candles returned for ${trade.symbol} (source: ${json.broker || selectedBroker}).`
+          );
         }
+      } else {
+        setChartData(null);
+        setCandleError(`Candle feed request failed (HTTP ${res.status}).`);
       }
     } catch (e) {
       console.error('Failed to load chart candles:', e);
+      setChartData(null);
+      setCandleError('Candle feed unreachable — check the backend connection.');
     } finally {
       setIsLoading(false);
     }
@@ -205,6 +230,35 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
 
       if (formattedCandles.length > 0) {
         candleSeries.setData(formattedCandles);
+        // v0.4.16: expose the series + forming candle to the live-tick poll.
+        const lastC = formattedCandles[formattedCandles.length - 1];
+        candleSeriesRef.current = candleSeries;
+        lastCandleRef.current = {
+          time: lastC.time,
+          open: lastC.open,
+          high: lastC.high,
+          low: lastC.low,
+          close: lastC.close,
+        };
+      }
+
+      // v0.4.16: LTP marker line — follows the live poll so the chart always
+      // shows where price is RIGHT NOW relative to ENTRY / SL / TP levels.
+      ltpLineRef.current = null;
+      const _initialLtp = currentLtp || (chartData.currentPrice ?? 0);
+      if (_initialLtp > 0) {
+        try {
+          ltpLineRef.current = candleSeries.createPriceLine({
+            price: _initialLtp,
+            color: '#38bdf8',
+            lineWidth: 1,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `LTP ₹${Number(_initialLtp).toFixed(2)}`,
+          });
+        } catch (ltpLineErr) {
+          console.warn('LTP price line skipped:', ltpLineErr);
+        }
       }
 
       // 2. Volume Series (Sub-chart at bottom)
@@ -356,6 +410,21 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
           });
         }
 
+        // v0.4.16: EXIT line for closed trades — shows where the round trip
+        // actually ended (was missing; the user listed it among levels they
+        // expected to verify visually).
+        const exitPrice = Number(trade.exitPrice || 0);
+        if (exitPrice > 0) {
+          candleSeries.createPriceLine({
+            price: exitPrice,
+            color: '#a78bfa',
+            lineWidth: 2,
+            lineStyle: LineStyle.Dotted,
+            axisLabelVisible: true,
+            title: `EXIT ₹${exitPrice.toFixed(2)}`,
+          });
+        }
+
         // Support & Resistance Channel Lines
         if (chartData.levels) {
           if (chartData.levels.resistance && chartData.levels.resistance > 0) {
@@ -433,8 +502,71 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
         }
         chartRef.current = null;
       }
+      candleSeriesRef.current = null;
+      ltpLineRef.current = null;
+      lastCandleRef.current = null;
     };
   }, [isOpen, chartData, trade, showIndicators, showLevels, isExpanded]);
+
+  // v0.4.16 (user-testing feedback 2026-09-08): LIVE price movement.
+  // The chart used to be a static snapshot — fetched once at modal open, so
+  // the user could never see price walk toward SL/target ("看不到价格移动方向").
+  // Poll the live quote every 3s while the modal is open: update the LTP
+  // header, extend the FORMING candle, and move the LTP price line — all
+  // without rebuilding the chart.
+  useEffect(() => {
+    if (!isOpen || !trade?.symbol) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/live-quotes?symbols=${encodeURIComponent(trade.symbol)}`);
+        if (!res.ok || cancelled) return;
+        const json = await res.json();
+        const q = json?.data?.[trade.symbol];
+        const ltp = Number(q?.price ?? 0);
+        if (!ltp || ltp <= 0 || cancelled) return;
+
+        setCurrentLtp(ltp);
+
+        // Extend the forming candle with the live tick.
+        const series = candleSeriesRef.current;
+        const last = lastCandleRef.current;
+        if (series && last) {
+          const updated = {
+            time: last.time,
+            open: last.open,
+            high: Math.max(last.high, ltp),
+            low: Math.min(last.low, ltp),
+            close: ltp,
+          };
+          try {
+            series.update(updated);
+            lastCandleRef.current = updated;
+          } catch {
+            // series rebuilt mid-tick — next render effect re-anchors us
+          }
+        }
+
+        // Move the LTP marker line.
+        const line = ltpLineRef.current;
+        if (line) {
+          try {
+            line.applyOptions({ price: ltp, title: `LTP ₹${ltp.toFixed(2)}` });
+          } catch {}
+        }
+      } catch {
+        // network hiccup — next tick retries
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [isOpen, trade?.symbol]);
 
   if (!trade) return null;
 
@@ -516,9 +648,10 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
               className="h-7 px-2 text-[11px] bg-ub-surface border border-ub-border rounded-md text-ub-text-primary focus:outline-none focus:border-ub-accent font-medium cursor-pointer"
             >
               <option value="auto">⚡ Live Broker Feed (Auto)</option>
+              <option value="fyers">Fyers (1m / 5m)</option>
               <option value="angel_one">Angel One SmartAPI</option>
               <option value="shoonya">Shoonya Finvasia</option>
-              <option value="yahoo">NSE Official Feed</option>
+              <option value="yahoo">Yahoo / NSE Fallback</option>
             </select>
 
             <Button
@@ -615,6 +748,27 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
             <div className="absolute inset-0 bg-[#090d16]/80 backdrop-blur-sm z-10 flex flex-col items-center justify-center gap-2">
               <RefreshCw className="h-7 w-7 text-ub-accent animate-spin" />
               <span className="text-xs text-ub-text-muted font-medium">Fetching real market candles...</span>
+            </div>
+          )}
+          {!isLoading && !chartData && candleError && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 p-6 text-center">
+              <AlertTriangle className="h-7 w-7 text-amber-400" />
+              <div>
+                <p className="text-sm font-semibold text-ub-text-primary">Chart data unavailable</p>
+                <p className="text-xs text-ub-text-muted mt-1 max-w-md">{candleError}</p>
+                <p className="text-[11px] text-ub-text-muted mt-2 max-w-md">
+                  The trade level lines below still apply — the candle feed (broker/Yahoo) just returned no data.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={fetchCandles}
+                className="h-7 border-ub-border text-ub-text-muted hover:text-ub-text-primary"
+              >
+                <RefreshCw className="h-3 w-3 mr-1.5" />
+                Retry
+              </Button>
             </div>
           )}
           <div ref={chartContainerRef} className="w-full h-full" />
