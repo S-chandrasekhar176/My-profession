@@ -319,6 +319,19 @@ class UltraBotEngine:
     # Start
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _will_run_paper(broker_name: Any, mode: str, broker_factory: Any = None) -> bool:
+        """True when BrokerFactory.create(broker_name, mode=mode) resolves to
+        PaperBroker (mirrors brokers/factory.py: mode=paper forces paper, and
+        paper-mapped aliases — paper/yahoofinance/demo/virtual/... — are paper
+        in any mode). Used to keep the PaperBroker ledger and the session on
+        the SAME capital regardless of the mode/broker label combination.
+        """
+        raw = str(broker_name or "paper").lower().strip().replace("-", "_").replace(" ", "")
+        alias_map = getattr(broker_factory, "_ALIAS_MAP", {}) or {}
+        normalized = alias_map.get(raw, raw)
+        return mode == "paper" or normalized == "paper"
+
     async def start(
         self,
         mode: str = "paper",
@@ -377,7 +390,16 @@ class UltraBotEngine:
             # configured ₹500k (margin checks and capital arithmetic ran on
             # two different numbers). Pass the engine-resolved capital for
             # paper sessions; live brokers fetch real margin below.
-            if mode == "paper":
+            # v0.4.15 hotfix: the factory returns PaperBroker for ANY
+            # paper-mapped name (paper/yahoofinance/demo/...) regardless of
+            # mode, and for any name when mode == "paper". The ledger must
+            # start from the engine-resolved capital in BOTH cases —
+            # previously the kwargs only carried it for mode == "paper", so
+            # (mode=live, broker=paper) booted the PaperBroker at the ₹100k
+            # factory default while the engine/session used the configured
+            # capital (two-ledger drift, G12 margin wall).
+            will_run_paper = UltraBotEngine._will_run_paper(broker_name, mode, self.broker_factory)
+            if will_run_paper:
                 merged_config.setdefault("initial_capital", self.initial_capital)
             self.broker = self.broker_factory.create(broker_name, mode=mode, **(merged_config or {}))
 
@@ -518,8 +540,12 @@ class UltraBotEngine:
                 # Genuinely new trading day session (or fresh session after mode switch)
                 if initial_capital is not None:
                     self.initial_capital = float(initial_capital)
-                elif self.mode == "live":
-                    # Live mode: attempt to fetch margin from broker (get_margin)
+                elif self.mode == "live" and not will_run_paper:
+                    # Live mode: attempt to fetch margin from broker (get_margin).
+                    # NEVER for paper-resolved brokers: PaperBroker.get_margin()
+                    # reports its own internal cash (factory default ₹100k when
+                    # unfunded) and the engine must not adopt that as session
+                    # capital — configured/carry-forward capital rules apply.
                     try:
                         if self.broker and hasattr(self.broker, "get_margin"):
                             margin_info = await self.broker.get_margin()
@@ -598,8 +624,9 @@ class UltraBotEngine:
                     else:
                         self.initial_capital = resolve_total_capital(config=self.config)
 
-                # Sync paper broker's internal capital if running in paper mode
-                if self.mode == "paper" and self.broker:
+                # Sync paper broker's internal capital whenever the factory
+                # resolved to PaperBroker (mode=paper OR paper-mapped name).
+                if will_run_paper and self.broker:
                     if hasattr(self.broker, "capital"):
                         self.broker.capital = self.initial_capital
                     if hasattr(self.broker, "initial_capital"):

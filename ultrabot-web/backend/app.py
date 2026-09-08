@@ -133,6 +133,10 @@ async def lifespan(app: FastAPI):
         feed_manager = FeedManager(primary=fyers_feed, backup=yahoo_feed)
         logger.info("FeedManager: primary=Fyers 1m Realtime, backup=Yahoo")
     else:
+        # v0.4.15: log the fallback branch too — a silent Yahoo-only boot was
+        # indistinguishable from the Fyers boot in the run log during the
+        # 2026-09-08 incident triage.
+        logger.info("FeedManager: primary=Yahoo (no valid Fyers token at boot), backup=None")
         feed_manager = FeedManager(primary=yahoo_feed, backup=None)
 
     # Strategy components
