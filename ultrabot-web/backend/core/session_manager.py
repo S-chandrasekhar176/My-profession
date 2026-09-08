@@ -142,6 +142,41 @@ class SessionManager:
             except Exception as wl_exc:
                 logger.warning("Could not fetch watchlist for state save: %s", wl_exc, exc_info=True)
 
+            # ----------------------------------------------------------
+            # v0.4.13: DB-truth fallback. save_state reads the BROKER book
+            # (above); after a same-day restart the paper broker's book can
+            # be empty while the DB still holds open positions (live
+            # incident 2026-09-07 09:42:48 IST: stop saved 0 with 3 open).
+            # Merge any DB open positions missing from the broker snapshot
+            # so the session state never "forgets" live positions — even if
+            # the engine-side rehydration missed an edge.
+            # ----------------------------------------------------------
+            try:
+                if hasattr(repo, "get_open_positions"):
+                    _db_open = await repo.get_open_positions()
+                    _known_symbols = {str(p.get("symbol") or "") for p in open_positions}
+                    _broker_count = len(open_positions)
+                    _merged = 0
+                    for _r in (_db_open or []):
+                        _sym = str(getattr(_r, "symbol", "") or "")
+                        if not _sym or _sym in _known_symbols:
+                            continue
+                        open_positions.append({
+                            "symbol": _sym,
+                            "quantity": int(getattr(_r, "quantity", 0) or 0),
+                            "avg_price": float(getattr(_r, "entry_price", 0.0) or 0.0),
+                            "pnl": 0.0,
+                        })
+                        _merged += 1
+                    if _merged:
+                        logger.warning(
+                            "save_state: broker book had %d position(s), DB holds %d more open "
+                            "(restart gap) — merged DB truth into the session snapshot",
+                            _broker_count, _merged,
+                        )
+            except Exception as _dbp_exc:
+                logger.warning("save_state: could not merge DB open positions: %s", _dbp_exc)
+
             # Get daily risk status
             daily_risk: Dict[str, Any] = {}
             if hasattr(engine, 'daily_risk') and engine.daily_risk is not None:

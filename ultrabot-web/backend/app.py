@@ -225,6 +225,32 @@ async def lifespan(app: FastAPI):
     market_scheduler.start()
     app.state.scheduler = market_scheduler
 
+    # -- v0.4.13 M2: periodic DB backups -------------------------------
+    # In-process (survivable, observable) snapshots every 15 min into
+    # persist/snapshots/ + EOD copy at 15:35 IST. Backed by the SQLite
+    # online backup API — safe with the live WAL engine. Rationale: the
+    # 2026-09-07 midday container recycle destroyed the day's DB (trades,
+    # 17 realtime shadow samples, Fyers creds) while the external cron
+    # that used to snapshot had died silently on Sep 4.
+    from core.db_backup import DatabaseBackupJob
+
+    persistence_cfg = settings.get_persistence_config()
+    if bool(persistence_cfg.get("enabled", True)):
+        try:
+            from db.database import DB_PATH as _DB_PATH
+
+            backup_job = DatabaseBackupJob(db_path=str(_DB_PATH), config=persistence_cfg)
+            backup_task = asyncio.create_task(backup_job.run_forever(), name="db-backup")
+            app.state.db_backup_job = backup_job
+            app.state.db_backup_task = backup_task
+            logger.info(
+                "DB backup job started: every %s min -> %s",
+                persistence_cfg.get("snapshot_interval_minutes", 15),
+                backup_job.snapshot_dir,
+            )
+        except Exception as bk_exc:
+            logger.warning("DB backup job failed to start (non-fatal): %s", bk_exc)
+
     # Late-start catch-up: APScheduler cron jobs never backfill missed runs,
     # so if the backend boots mid-market on a fresh trading day (e.g. 10:30
     # AM), today's 08:45 pre-market init (Top-10 watchlist generation + daily
@@ -280,6 +306,10 @@ async def lifespan(app: FastAPI):
         catchup_task.cancel()
     if hasattr(app.state, "scheduler"):
         app.state.scheduler.stop()
+    if hasattr(app.state, "db_backup_task"):
+        app.state.db_backup_task.cancel()
+    if hasattr(app.state, "db_backup_job"):
+        app.state.db_backup_job.stop()
     if hasattr(app.state, "telegram_interactive"):
         await app.state.telegram_interactive.stop()
     if eng.state.value != "stopped":

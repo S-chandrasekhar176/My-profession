@@ -194,6 +194,10 @@ class Settings(BaseSettings):
     def get_fees_config(self) -> Dict[str, Any]:
         return self._raw_config.get("fees", {})
 
+    def get_persistence_config(self) -> Dict[str, Any]:
+        """v0.4.13: periodic DB backup / handoff persistence settings."""
+        return self._raw_config.get("persistence", {})
+
     def get_market_config(self) -> Dict[str, Any]:
         return self._raw_config.get("market", {})
 

@@ -49,6 +49,17 @@ _CANARY_REPEAT_MINUTES = 45
 _PUSH_INTERVAL_S = 5
 _CANARY_INTERVAL_S = 120
 
+# v0.4.13 canary false-positive fix (live 2026-09-07 10:50 & 11:58 IST:
+# "engine is scanning" flagged as blind). States in which the bot is NOT
+# blind during market hours:
+#   running/starting — obviously healthy
+#   scanning — the transient state DURING a scan tick (loop 1011 runs
+#     while RUNNING/PAUSED/SCANNING and still calls _manage_all_positions)
+#   paused — user-intentional no-NEW-entries state; the main loop still
+#     enforces SLs/targets/time-stops on open positions, so exits are NOT
+#     blind. (A user-paused botalerting "blind" every 45 min is noise.)
+_CANARY_HEALTHY_STATES = ("running", "starting", "scanning", "paused")
+
 
 def _esc(val: Any) -> str:
     if val is None:
@@ -675,7 +686,7 @@ class InteractiveTelegramBot:
                     except TypeError:
                         is_open = bool(mh.is_market_open())
                     state = getattr(getattr(self.engine, "state", None), "value", "unknown")
-                    if is_open and state not in ("running", "starting"):
+                    if is_open and state not in _CANARY_HEALTHY_STATES:
                         key = "engine_down"
                         last = self._last_canary.get(key, 0)
                         grace_over = now.time() >= datetime.strptime("09:35", "%H:%M").time()
