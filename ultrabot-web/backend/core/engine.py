@@ -1797,7 +1797,14 @@ class UltraBotEngine:
                     price=current_price,
                     confidence=float(signal.get("confidence", 0.0)),
                     gate="ALL_GATES_PASSED",
-                    reason="Passed all risk gates - opportunity created",
+                    # v0.4.16 (user-testing feedback 2026-09-08): the old text
+                    # promised "opportunity created" but creation can still be
+                    # stopped by the shadow divert, G20/G17/G19 post-sizing
+                    # re-checks, or an exception. The scan timeline now gets a
+                    # dedicated OPPORTUNITY_CREATED event the moment the card
+                    # actually exists — no more "gates passed but no card"
+                    # ambiguity (live: SHREECEM MRF BUY 14:04:06).
+                    reason="Passed all risk gates",
                 )
 
                 # ----------------------------------------------------------
@@ -2195,6 +2202,21 @@ class UltraBotEngine:
                     "confidence": opportunity.get("confidence", 0.0),
                     "ttl_seconds": opportunity.get("ttl_seconds", 360),
                 })
+
+                # v0.4.16: terminal scan-timeline event — the card EXISTS and
+                # was broadcast. Every "ALL_GATES_PASSED without a card" now
+                # has a deterministic answer in the timeline (SHADOW_PASSED /
+                # REJECTED / ERROR before this point, or this event).
+                self._record_telemetry_event(
+                    symbol=symbol,
+                    strategy=strategy_name,
+                    status="OPPORTUNITY_CREATED",
+                    direction=signal.get("direction", "—"),
+                    price=opportunity.get("entry_price", current_price),
+                    confidence=float(signal.get("confidence", 0.0)),
+                    gate="OPPORTUNITY",
+                    reason=f"Opportunity card {opp_id} created and broadcast (TTL {opportunity.get('ttl_seconds', 360)}s)",
+                )
 
             except Exception as strat_exc:
                 self._errors_count += 1
@@ -3401,6 +3423,23 @@ class UltraBotEngine:
         if opportunity is None:
             return {"status": "not_found", "error": f"Opportunity {opportunity_id} not in pending list"}
 
+        # v0.4.16 (user-testing feedback 2026-09-08): every early-return below
+        # POPS the opportunity — if its DB signal stayed 'pending' it would
+        # later be swept to "Pending opportunity lost on engine restart" and
+        # the UI would show the same setup in both the confirmed and the
+        # invalidated/expired lists. Resolve the signal at every exit.
+        async def _resolve_popped_signal(status_val: str, note: str) -> None:
+            _sig_id = opportunity.get("signal_id")
+            if not _sig_id:
+                return
+            try:
+                async with self._repo_context() as repo:
+                    await repo.update_signal(_sig_id, status=status_val, rejection_reason=note)
+            except Exception:
+                logger.debug(
+                    "Could not resolve popped signal %s as %s", _sig_id, status_val, exc_info=True
+                )
+
         # --- TTL Expiry Check ---
         created_at_str = opportunity.get("created_at")
         if created_at_str:
@@ -3410,9 +3449,11 @@ class UltraBotEngine:
                 risk_config = self.config.get_risk_config() if hasattr(self.config, "get_risk_config") else {}
                 ttl_seconds = risk_config.get("opportunity_ttl_seconds", 120)
                 if age_seconds > ttl_seconds:
+                    _ttl_reason = f"Opportunity expired after {int(ttl_seconds)}s (momentum window closed). Execution aborted to prevent stale trade."
+                    await _resolve_popped_signal("expired", _ttl_reason)
                     return {
                         "status": "rejected",
-                        "reason": f"Opportunity expired after {int(ttl_seconds)}s (momentum window closed). Execution aborted to prevent stale trade.",
+                        "reason": _ttl_reason,
                     }
             except Exception:
                 pass
@@ -3442,6 +3483,9 @@ class UltraBotEngine:
         dir_upper = direction.upper()
         if dir_upper in ("BUY", "LONG"):
             if target > 0 and current_price >= target:
+                await _resolve_popped_signal(
+                    "expired", f"Target ₹{target:.2f} reached before execution (LTP: ₹{current_price:.2f})"
+                )
                 return {
                     "status": "rejected",
                     "reason": f"Target ₹{target:.2f} reached before execution (LTP: ₹{current_price:.2f}). Move finished — trade rejected to prevent buying top.",
@@ -3449,6 +3493,9 @@ class UltraBotEngine:
                     "target": target,
                 }
             if stop_loss > 0 and current_price <= stop_loss:
+                await _resolve_popped_signal(
+                    "expired", f"Stop loss ₹{stop_loss:.2f} breached before execution (LTP: ₹{current_price:.2f})"
+                )
                 return {
                     "status": "rejected",
                     "reason": f"Stop loss ₹{stop_loss:.2f} breached (LTP: ₹{current_price:.2f}). Setup invalidated.",
@@ -3457,6 +3504,9 @@ class UltraBotEngine:
                 }
         elif dir_upper in ("SELL", "SHORT"):
             if target > 0 and current_price <= target:
+                await _resolve_popped_signal(
+                    "expired", f"Target ₹{target:.2f} reached before execution (LTP: ₹{current_price:.2f})"
+                )
                 return {
                     "status": "rejected",
                     "reason": f"Target ₹{target:.2f} reached before execution (LTP: ₹{current_price:.2f}). Move finished — trade rejected to prevent selling bottom.",
@@ -3464,6 +3514,9 @@ class UltraBotEngine:
                     "target": target,
                 }
             if stop_loss > 0 and current_price >= stop_loss:
+                await _resolve_popped_signal(
+                    "expired", f"Stop loss ₹{stop_loss:.2f} breached before execution (LTP: ₹{current_price:.2f})"
+                )
                 return {
                     "status": "rejected",
                     "reason": f"Stop loss ₹{stop_loss:.2f} breached (LTP: ₹{current_price:.2f}). Setup invalidated.",
@@ -3477,6 +3530,9 @@ class UltraBotEngine:
         mismatch_threshold = risk_config.get("price_mismatch_threshold_pct", 0.5)
 
         if price_mismatch_pct > mismatch_threshold:
+            await _resolve_popped_signal(
+                "expired", f"Price mismatch too large at confirm: {price_mismatch_pct:.2f}% > {mismatch_threshold}%"
+            )
             return {
                 "status": "rejected",
                 "reason": f"Price mismatch too large: {price_mismatch_pct:.2f}% > {mismatch_threshold}%",
@@ -3490,6 +3546,9 @@ class UltraBotEngine:
 
         risk_result = await self._run_risk_gates(signal_data, symbol, current_price)
         if not risk_result.get("passed", False):
+            await _resolve_popped_signal(
+                "expired", f"Risk gates failed on re-check: {risk_result.get('block_reason', 'unknown')}"
+            )
             return {
                 "status": "rejected",
                 "reason": risk_result.get("block_reason", "Risk gates failed on re-check"),
@@ -3862,6 +3921,22 @@ class UltraBotEngine:
                 extra=position_extra,
             )
 
+            # v0.4.16 (user-testing feedback 2026-09-08): the DB signal row
+            # stayed 'pending' after a successful fill — on the next engine
+            # restart the orphan sweep branded ACCEPTED, EXECUTED trades as
+            # "Pending opportunity lost on engine restart" (sandbox: 3 such
+            # rows on 2026-09-08). Resolve the signal the moment it becomes a
+            # trade; lowercase matches create_signal/skip conventions.
+            _filled_signal_id = opportunity.get("signal_id")
+            if _filled_signal_id:
+                try:
+                    await repo.update_signal(_filled_signal_id, status="filled")
+                except Exception as sig_fill_exc:
+                    logger.warning(
+                        "Could not mark signal %s filled after trade %s: %s",
+                        _filled_signal_id, trade_id, sig_fill_exc,
+                    )
+
         self._trades_executed += 1
 
 
@@ -3869,6 +3944,12 @@ class UltraBotEngine:
         trade_payload = {
             "type": "trade_fill",
             "trade_id": trade_id,
+            # v0.4.16: lets the web dashboard mark the card confirmed when the
+            # approval came from TELEGRAM (previously only the confirming
+            # browser updated its own card, so the dashboard kept showing the
+            # already-executed opportunity as pending until it rotted to
+            # "expired").
+            "opportunity_id": opportunity_id,
             "symbol": symbol,
             "direction": direction,
             "quantity": filled_qty,
