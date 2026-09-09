@@ -758,8 +758,17 @@ class UltraBotEngine:
             # At start() time pending_opportunities is by definition empty,
             # so ANY pre-existing 'pending' signal is an orphan — expire it
             # with an honest reason so the ledger stays truthful.
+            # v0.4.17: cards snapshotted into their signal rows at creation
+            # are RE-ARMED first; only genuine orphans are expired now.
+            _restored_signal_ids: set = set()
             try:
-                await self._expire_orphaned_pending_signals()
+                _restored_signal_ids = await self._restore_pending_opportunities()
+            except Exception as restore_exc:
+                logger.warning(
+                    "Could not restore pending opportunities: %s", restore_exc, exc_info=True
+                )
+            try:
+                await self._expire_orphaned_pending_signals(skip_ids=_restored_signal_ids)
             except Exception as orphan_exc:
                 logger.warning(
                     "Could not expire orphaned pending signals: %s", orphan_exc, exc_info=True
@@ -2186,6 +2195,23 @@ class UltraBotEngine:
                     "opportunity": opportunity,
                 })
 
+                # v0.4.17: persist the full card inside the signal row so a
+                # mid-day restart can RE-ARM the pending opportunity instead
+                # of orphaning it. Pending cards previously lived ONLY in
+                # engine memory — every restart silently killed them and the
+                # boot sweep then branded their signals "Pending opportunity
+                # lost on engine restart" (3 such rows on 2026-09-08).
+                try:
+                    await repo.update_signal(
+                        sig_id,
+                        signal_data={**(signal or {}), "opportunity": opportunity},
+                    )
+                except Exception as snap_exc:
+                    logger.warning(
+                        "Could not persist opportunity snapshot for signal %s: %s",
+                        sig_id, snap_exc,
+                    )
+
                 # v0.4.8 P1: Telegram ping for the human-in-the-loop flow.
                 # Execution is confirm-only by design, so a pending
                 # opportunity is INVISIBLE outside the dashboard — live
@@ -2614,7 +2640,98 @@ class UltraBotEngine:
     # Continuous Opportunity Validation
     # ------------------------------------------------------------------
 
-    async def _expire_orphaned_pending_signals(self) -> int:
+    async def _restore_pending_opportunities(self) -> set:
+        """v0.4.17: re-arm pending opportunity cards that survived in DB.
+
+        Since v0.4.17 the creation path snapshots the full opportunity dict
+        into the signal row (``signal_data["opportunity"]``). On restart we
+        re-arm every still-valid pending card (created today, TTL not
+        elapsed, market open) back into ``pending_opportunities`` and
+        re-broadcast it so the dashboard card reappears. Legacy rows without
+        a snapshot (pre-v0.4.17) are left for the orphan sweep to expire
+        honestly.
+
+        Returns the set of SIGNAL ids that were restored — the orphan sweep
+        must NOT expire those rows (they are live cards again, and their DB
+        status correctly stays 'pending' until confirm/validate resolves
+        them).
+        """
+        restored_signal_ids: set = set()
+        try:
+            now = datetime.now(IST)
+            if self.market_hours and not self.market_hours.is_market_open():
+                return restored_signal_ids  # intraday pendings are dead after close
+            async with self._repo_context() as repo:
+                if repo is None or not hasattr(repo, "get_signals_by_status"):
+                    return restored_signal_ids
+                today_str = now.strftime("%Y-%m-%d")
+                rows: list = []
+                seen_ids: set = set()
+                for status_val in ("pending", "PENDING"):
+                    try:
+                        for sig in await repo.get_signals_by_status(status_val):
+                            _sid = getattr(sig, "id", None)
+                            if _sid and _sid not in seen_ids:
+                                seen_ids.add(_sid)
+                                rows.append(sig)
+                    except Exception:
+                        continue
+                for sig in rows:
+                    try:
+                        created_at = getattr(sig, "created_at", None)
+                        if created_at is None or not str(created_at).startswith(today_str):
+                            continue  # stale cross-day row — sweep will expire it
+                        data = getattr(sig, "signal_data", None)
+                        if isinstance(data, str):
+                            try:
+                                data = json.loads(data)
+                            except Exception:
+                                data = {}
+                        opp = data.get("opportunity") if isinstance(data, dict) else None
+                        if not isinstance(opp, dict) or not opp.get("id"):
+                            continue  # legacy row (pre-v0.4.17) — sweep handles it
+                        # TTL check from the card's own expiry stamp
+                        try:
+                            expiry_dt = datetime.fromisoformat(str(opp.get("expiry_at") or ""))
+                        except (TypeError, ValueError):
+                            continue
+                        if expiry_dt.tzinfo is None:
+                            expiry_dt = expiry_dt.replace(tzinfo=IST)
+                        if expiry_dt <= now:
+                            continue  # TTL elapsed while we were down — sweep it
+                        async with self._opportunities_lock:
+                            self.pending_opportunities[opp["id"]] = opp
+                        restored_signal_ids.add(getattr(sig, "id"))
+                        # Re-broadcast so any dashboard connected AFTER the
+                        # restart sees the card again. Telegram inline buttons
+                        # stay functional too: the opportunity_id is unchanged.
+                        await self._broadcast("opportunity", {
+                            "type": "new_opportunity",
+                            "opportunity": opp,
+                            "restored": True,
+                        })
+                        logger.info(
+                            "Restored pending opportunity %s %s (%s) after restart — "
+                            "%.0fs of TTL remaining",
+                            opp.get("symbol"), opp.get("direction"),
+                            str(opp.get("id", ""))[:8],
+                            (expiry_dt - now).total_seconds(),
+                        )
+                    except Exception as row_err:
+                        logger.warning(
+                            "Could not restore pending opportunity from signal %s: %s",
+                            getattr(sig, "id", "?"), row_err,
+                        )
+        except Exception as exc:
+            logger.warning("Could not restore pending opportunities: %s", exc, exc_info=True)
+        if restored_signal_ids:
+            logger.info(
+                "Re-armed %d pending opportunity card(s) after restart",
+                len(restored_signal_ids),
+            )
+        return restored_signal_ids
+
+    async def _expire_orphaned_pending_signals(self, skip_ids: Optional[set] = None) -> int:
         """Resolve signals stuck at status 'pending' from previous runs.
 
         Pending opportunities live ONLY in engine memory (the session
@@ -2647,6 +2764,10 @@ class UltraBotEngine:
                         continue
                 for sig in orphan_rows:
                     try:
+                        # v0.4.17: rows re-armed by _restore_pending_opportunities
+                        # are LIVE cards again — their signals must stay 'pending'.
+                        if skip_ids and getattr(sig, "id", None) in skip_ids:
+                            continue
                         await repo.update_signal(
                             sig.id,
                             status="EXPIRED",

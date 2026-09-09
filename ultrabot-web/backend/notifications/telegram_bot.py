@@ -4,8 +4,10 @@ Sends trade fills, partial bookings, stop loss hits, target hits,
 risk warnings, engine status changes, error alerts, morning briefings, and EOD reports
 via the Telegram Bot API with HTML sanitization.
 """
+import asyncio
 import html
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from zoneinfo import ZoneInfo
@@ -18,6 +20,17 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 _TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
+
+# v0.4.17 (Telegram 429 flood, 2026-09-08): the boot sequence fires every
+# alert category in one burst (orphan sweep, feed recovery, risk rehydration,
+# engine status…). Telegram's bot API allows roughly 1 msg/sec per chat —
+# the burst hit 429 on ~45 queued alerts. Defense lives HERE, at the single
+# choke point every template method funnel through:
+#   1. client-side pacing — never send two messages within _MIN_SEND_INTERVAL
+#   2. server-side respect — on HTTP 429, sleep `parameters.retry_after`
+#      (bounded) and retry exactly once, then drop with an error log.
+_MIN_SEND_INTERVAL = 1.2   # seconds between sends to the same chat
+_MAX_RETRY_WAIT = 30.0     # never sleep longer than this on a 429
 
 
 def _esc(val: Any) -> str:
@@ -39,6 +52,9 @@ class TelegramBot:
         self.bot_token = str(bot_token or "").strip()
         self.chat_id = str(chat_id or "").strip()
         self._timeout = 10.0
+        # v0.4.17: send pacing state (serialized sends + min interval)
+        self._send_lock = asyncio.Lock()
+        self._last_send_mono = 0.0
 
     def update_credentials(self, bot_token: str, chat_id: str) -> None:
         """Update Telegram credentials dynamically."""
@@ -52,6 +68,9 @@ class TelegramBot:
     async def send_message(self, text: str) -> bool:
         """POST a text message to the configured Telegram chat.
 
+        v0.4.17: all sends are serialized through a lock and paced at
+        _MIN_SEND_INTERVAL; HTTP 429 responses honor `parameters.retry_after`
+        (bounded by _MAX_RETRY_WAIT) and retry once before giving up.
         Returns True on success, False on any failure or missing token.
         """
         if not self.bot_token or not self.chat_id:
@@ -66,17 +85,56 @@ class TelegramBot:
             "disable_web_page_preview": True,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                body = resp.json()
-                if not body.get("ok"):
-                    logger.error("Telegram API error: %s", body.get("description"))
+        async with self._send_lock:
+            loop = asyncio.get_running_loop()
+            # 1. Client-side pacing: never send two messages back-to-back.
+            gap = _MIN_SEND_INTERVAL - (loop.time() - self._last_send_mono)
+            if gap > 0:
+                await asyncio.sleep(gap)
+
+            for attempt in (1, 2):
+                try:
+                    self._last_send_mono = loop.time()
+                    async with httpx.AsyncClient(timeout=self._timeout) as client:
+                        resp = await client.post(url, json=payload)
+
+                    # 2. Server-side 429: honor retry_after, retry once.
+                    if resp.status_code == 429:
+                        body_429: dict = {}
+                        try:
+                            body_429 = resp.json()
+                        except Exception:
+                            pass
+                        retry_after = 0.0
+                        try:
+                            retry_after = float(
+                                (body_429.get("parameters") or {}).get("retry_after", 0) or 0
+                            )
+                        except (TypeError, ValueError):
+                            retry_after = 0.0
+                        retry_after = min(max(retry_after, 1.0), _MAX_RETRY_WAIT)
+                        if attempt == 1:
+                            logger.warning(
+                                "Telegram 429 (flood) — backing off %.1fs before one retry",
+                                retry_after,
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+                        logger.error(
+                            "Telegram 429 persisted after backoff — dropping message "
+                            "(first 80 chars: %s)", text[:80],
+                        )
+                        return False
+
+                    resp.raise_for_status()
+                    body = resp.json()
+                    if not body.get("ok"):
+                        logger.error("Telegram API error: %s", body.get("description"))
+                        return False
+                    return True
+                except Exception as exc:
+                    logger.error("Failed to send Telegram message: %s", exc)
                     return False
-                return True
-        except Exception as exc:
-            logger.error("Failed to send Telegram message: %s", exc)
             return False
 
     # ------------------------------------------------------------------

@@ -1,33 +1,69 @@
 #!/usr/bin/env python3
-"""Session watchdog: keep the backend alive and snapshot the DB.
+"""Session watchdog v2 (v0.4.17): keep the backend alive, and when it CAN'T,
+leave behind enough evidence to answer "what killed it, and when".
 
-Why: the sandbox periodically sweeps /tmp, backend/data, backend/reports and
-reaps processes (incident 2026-09-03 ~11:39 IST). Mitigation:
-- Backend runs with DB_PATH + ENCRYPTION_KEY in bot_analysis/persist/ (swept area avoided)
-- This watchdog restarts the backend if health fails, using the same env vars
-- Every 15 min the SQLite DB + EOD reports are snapshotted into persist/snapshots/
+Why: across 2026-09-07/08 the sandbox backend died silently ~10× during
+market hours (no traceback, no log tail — the process was simply gone).
+Evidence so far points to TWO distinct phenomena:
+
+  L1/L2 — backend-process death (workspace survives): Sep 7 the watcher kept
+          logging "Connection refused" 13:08→15:30 IST after the backend died.
+  L3    — workspace suspension / recycle (EVERYTHING dies, even a trivial
+          bash canary; filesystem later re-provisioned): Sep 7 19:17 IST and
+          the 4th wipe on Sep 8 evening.
+
+What this watchdog does about it:
+  * polls /api/health every POLL_INTERVAL seconds (was 60s, now 15s)
+  * appends a heartbeat line to persist/heartbeat.log (UP/DOWN + latency)
+  * spawns TWO independent canary processes (scripts/canary_heartbeat.py)
+  * on alive→down transition: writes a forensic bundle to
+    persist/death_reports/death-<ts>.json — process census, canary freshness,
+    backend-log tail, meminfo/loadavg, best-effort dmesg — and CLASSIFIES
+    the death (backend_process_death vs workspace_suspension)
+  * alerts Telegram (best-effort, creds read from config yaml) EXCEPT when
+    the stop was intentional (see marker below) or the workspace itself froze
+  * auto-restarts the backend with a per-day cap and exponential backoff
+    (position rehydration is proven; restart storms are the real risk)
+  * honors an INTENTIONAL-STOP marker: `touch persist/BACKEND_STOPPED_
+    INTENTIONALLY` before a graceful stop suppresses restart+alert for
+    STOP_MARKER_TTL (2h) — so the watchdog stops fighting planned shutdowns
+  * keeps the v0.4.13 15-minute DB snapshot job unchanged
 
 Usage: python3 session_watchdog.py  (run via scripts/daemonize.py)
 """
+import json
 import os
 import shutil
 import subprocess
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
 BASE = "http://127.0.0.1:8000"
 PERSIST = Path("/home/z/my-project/bot_analysis/persist")
 SNAP = PERSIST / "snapshots"
 LOGS = Path("/home/z/my-project/bot_analysis/logs")
+DEATH_REPORTS = PERSIST / "death_reports"
+STOP_MARKER = PERSIST / "BACKEND_STOPPED_INTENTIONALLY"
+RESTART_COUNTER = PERSIST / "watchdog_restarts.json"
 DAEMONIZE = "/home/z/my-project/bot_analysis/Awesome_DE/scripts/daemonize.py"
+WATCHDOG_DIR = "/home/z/my-project/bot_analysis/Awesome_DE/scripts"
 VENV_PY = "/home/z/my-project/bot_analysis/venv/bin/python"
 APP_DIR = "/home/z/my-project/bot_analysis/Awesome_DE/ultrabot-web/backend"
 REPORTS = APP_DIR + "/reports"
+BACKEND_LOG = LOGS / "backend.log"
 
-SNAP_DIR = SNAP
+POLL_INTERVAL = 15
+SNAPSHOT_INTERVAL = 900
 MAX_SNAPS = 12
+MAX_RESTARTS_PER_DAY = 5
+BACKOFF_BASE = 15.0
+BACKOFF_CAP = 300.0
+STOP_MARKER_TTL = 2 * 3600.0
+CANARY_STALE_SECONDS = 90
+HEARTBEAT_MAX_BYTES = 5 * 1024 * 1024
+CANARY_NAMES = ("a", "b")
 
 
 def log(msg: str) -> None:
@@ -35,11 +71,222 @@ def log(msg: str) -> None:
     print(line, flush=True)
 
 
-def health_ok() -> bool:
+# ────────────────────────────────────────────
+# Heartbeat
+# ────────────────────────────────────────────
+
+def heartbeat(state: str, latency_ms: int = -1) -> None:
+    try:
+        PERSIST.mkdir(parents=True, exist_ok=True)
+        hb = PERSIST / "heartbeat.log"
+        if hb.exists() and hb.stat().st_size > HEARTBEAT_MAX_BYTES:
+            shutil.copy2(hb, PERSIST / "heartbeat.log.1")
+            hb.write_text("")
+        with open(PERSIST / "heartbeat.log", "a") as f:
+            f.write(f"{datetime.now().isoformat(timespec='seconds')},{state},{latency_ms}\n")
+    except Exception:
+        pass  # heartbeat must never kill the watchdog
+
+
+# ────────────────────────────────────────────
+# Health
+# ────────────────────────────────────────────
+
+def health_ok() -> tuple[bool, int]:
+    start = time.monotonic()
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(BASE + "/api/health", timeout=5) as r:
-            return r.status == 200
+            return r.status == 200, int((time.monotonic() - start) * 1000)
+    except Exception:
+        return False, -1
+
+
+# ────────────────────────────────────────────
+# Canary management + freshness
+# ────────────────────────────────────────────
+
+def _proc_census() -> list:
+    """Snapshot of interesting live processes: [(pid, state, cmdline-prefix)]."""
+    out = []
+    try:
+        for pid_dir in Path("/proc").iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            try:
+                cmd = (pid_dir / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "ignore").strip()
+                state = (pid_dir / "stat").read_text().split()[2] if (pid_dir / "stat").exists() else "?"
+            except Exception:
+                continue
+            if cmd and any(k in cmd for k in ("uvicorn", "canary_heartbeat", "session_watchdog", "app:app")):
+                out.append({"pid": int(pid_dir.name), "state": state, "cmd": cmd[:160]})
+    except Exception:
+        pass
+    return out
+
+
+def canary_age(name: str) -> float:
+    """Seconds since the canary last wrote its timestamp file; -1 if unreadable."""
+    path = PERSIST / f"canary_{name}.heartbeat"
+    try:
+        raw = path.read_text().strip()
+        ts = datetime.fromisoformat(raw)
+        return (datetime.now(ts.tzinfo) - ts).total_seconds() if ts.tzinfo else (datetime.now() - ts).total_seconds()
+    except Exception:
+        return -1.0
+
+
+def spawn_canaries() -> None:
+    fresh = {n for n in CANARY_NAMES if 0 <= canary_age(n) <= CANARY_STALE_SECONDS}
+    alive = {p.get("cmd", "") for p in _proc_census() if "canary_heartbeat" in p.get("cmd", "")}
+    for name in CANARY_NAMES:
+        if name in fresh:
+            continue
+        # no fresh heartbeat — is a canary process even running for it?
+        running = any(f"canary_heartbeat.py {name}" in cmd for cmd in alive)
+        if not running:
+            try:
+                subprocess.run(
+                    ["python3", DAEMONIZE, str(LOGS / f"canary_{name}.log"),
+                     "python3", str(Path(WATCHDOG_DIR) / "canary_heartbeat.py"), name],
+                    cwd=WATCHDOG_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                log(f"canary '{name}' spawned")
+            except Exception as exc:
+                log(f"canary '{name}' spawn failed: {exc}")
+
+
+# ────────────────────────────────────────────
+# Forensics
+# ────────────────────────────────────────────
+
+def capture_forensics(last_up_iso: str) -> dict:
+    report = {
+        "detected_at": datetime.now().isoformat(timespec="seconds"),
+        "last_seen_up": last_up_iso,
+        "census": _proc_census(),
+        "canaries": {n: canary_age(n) for n in CANARY_NAMES},
+        "mem": {},
+        "loadavg": "",
+        "backend_log_tail": [],
+        "dmesg_tail": [],
+    }
+    try:
+        for key in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith(key):
+                    report["mem"][key] = line.split(":", 1)[1].strip()
+                    break
+        report["loadavg"] = Path("/proc/loadavg").read_text().strip()
+    except Exception:
+        pass
+    try:
+        if BACKEND_LOG.exists():
+            lines = BACKEND_LOG.read_text(errors="ignore").splitlines()
+            report["backend_log_tail"] = lines[-150:]
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["dmesg", "-T", "--time-format", "iso"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            report["dmesg_tail"] = r.stdout.splitlines()[-40:]
+    except Exception:
+        pass  # containerized: usually permission-denied — absence is itself data
+
+    ages = report["canaries"]
+    stale = [n for n, a in ages.items() if a < 0 or a > CANARY_STALE_SECONDS]
+    backend_down_but_alive = any(
+        "uvicorn" in p.get("cmd", "") or "app:app" in p.get("cmd", "") for p in report["census"]
+    )
+    if backend_down_but_alive:
+        # process exists but health fails — hang, not death
+        report["classification"] = "backend_hung (process alive, health failing)"
+    elif len(stale) == len(CANARY_NAMES):
+        report["classification"] = "workspace_suspension_or_recycle (L3 — everything froze)"
+    else:
+        report["classification"] = "backend_process_death (L1/L2 — canaries alive)"
+    return report
+
+
+def write_death_report(last_up_iso: str) -> dict:
+    try:
+        DEATH_REPORTS.mkdir(parents=True, exist_ok=True)
+        report = capture_forensics(last_up_iso)
+        path = DEATH_REPORTS / f"death-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        path.write_text(json.dumps(report, indent=2, default=str))
+        log(f"DEATH REPORT -> {path} [{report['classification']}]")
+        return report
+    except Exception as exc:
+        log(f"death report failed: {exc}")
+        return {"classification": "report_failed"}
+
+
+# ────────────────────────────────────────────
+# Telegram (best-effort, standalone)
+# ────────────────────────────────────────────
+
+def _telegram_creds() -> tuple:
+    for name in ("defaults.local.yaml", "defaults.yaml"):
+        path = Path(APP_DIR) / "config" / name
+        try:
+            import yaml
+            cfg = yaml.safe_load(path.read_text()) or {}
+            notif = (cfg.get("notifications") or {}) if isinstance(cfg, dict) else {}
+            token = str(notif.get("telegram_bot_token") or "").strip()
+            chat = str(notif.get("telegram_chat_id") or "").strip()
+            if token and chat:
+                return token, chat
+        except Exception:
+            continue
+    return "", ""
+
+
+def telegram_alert(text: str) -> None:
+    try:
+        token, chat = _telegram_creds()
+        if not token or not chat:
+            log("telegram alert skipped (no creds in config)")
+            return
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = json.dumps({"chat_id": chat, "text": text[:3900]}).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=10) as r:
+            r.read()
+        log("telegram alert sent")
+    except Exception as exc:
+        log(f"telegram alert failed: {exc}")
+
+
+# ────────────────────────────────────────────
+# Restart policy
+# ────────────────────────────────────────────
+
+def restarts_today() -> int:
+    try:
+        data = json.loads(RESTART_COUNTER.read_text())
+        if data.get("date") == date.today().isoformat():
+            return int(data.get("count", 0))
+    except Exception:
+        pass
+    return 0
+
+
+def bump_restart_counter() -> int:
+    count = restarts_today() + 1
+    try:
+        RESTART_COUNTER.write_text(json.dumps({"date": date.today().isoformat(), "count": count}))
+    except Exception:
+        pass
+    return count
+
+
+def stop_marker_fresh() -> bool:
+    try:
+        age = time.time() - STOP_MARKER.stat().st_mtime
+        return age < STOP_MARKER_TTL
     except Exception:
         return False
 
@@ -51,7 +298,7 @@ def start_backend() -> None:
         "ENCRYPTION_KEY": (PERSIST / ".encryption_key").read_text().strip(),
     }
     subprocess.run(
-        ["python3", DAEMONIZE, str(LOGS / "backend.log"),
+        ["python3", DAEMONIZE, str(BACKEND_LOG),
          VENV_PY, "-m", "uvicorn", "app:app",
          "--host", "127.0.0.1", "--port", "8000", "--app-dir", APP_DIR],
         cwd=APP_DIR, env=env,
@@ -62,48 +309,112 @@ def start_backend() -> None:
 
 
 def snapshot() -> None:
-    SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    SNAP.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M")
     db = PERSIST / "ultrabot.db"
     if db.exists():
         for suffix in ("", "-wal", "-shm"):
             src = Path(str(db) + suffix)
             if src.exists():
-                shutil.copy2(src, SNAP_DIR / f"ultrabot-{ts}{suffix or '.db'}")
+                shutil.copy2(src, SNAP / f"ultrabot-{ts}{suffix or '.db'}")
         log(f"db snapshot {ts}")
     rep = Path(REPORTS)
     if rep.is_dir():
         for f in rep.glob("*.pdf"):
-            dst = SNAP_DIR / f.name
+            dst = SNAP / f.name
             if not dst.exists():
                 shutil.copy2(f, dst)
                 log(f"report backed up: {f.name}")
     # prune old snapshots (keep MAX_SNAPS by mtime, per extension family)
-    snaps = sorted(SNAP_DIR.glob("ultrabot-*-wal"), key=lambda p: p.stat().st_mtime)
+    snaps = sorted(SNAP.glob("ultrabot-*-wal"), key=lambda p: p.stat().st_mtime)
     for extra in snaps[:-MAX_SNAPS]:
         stem = extra.name.replace("-wal", "")
         for suffix in ("-wal", "-shm", ".db"):
-            old = SNAP_DIR / (stem + suffix)
+            old = SNAP / (stem + suffix)
             if old.exists():
                 old.unlink()
 
 
+# ────────────────────────────────────────────
+# Main loop
+# ────────────────────────────────────────────
+
 def main() -> None:
-    log(f"watchdog started (pid={os.getpid()})")
+    log(f"watchdog v2 started (pid={os.getpid()}, poll={POLL_INTERVAL}s)")
+    LOGS.mkdir(parents=True, exist_ok=True)
+    spawn_canaries()
     last_snap = 0.0
+    last_up_iso = datetime.now().isoformat(timespec="seconds")
+    was_up = True
+    backoff_n = 0
+
     while True:
         try:
-            if not health_ok():
-                log("health DOWN — restarting backend")
-                start_backend()
-                time.sleep(15)
-                log("post-restart health: " + ("OK" if health_ok() else "STILL DOWN"))
-            if time.time() - last_snap > 900:
+            up, latency = health_ok()
+            heartbeat("UP" if up else "DOWN", latency if up else -1)
+
+            if up:
+                if not was_up:
+                    log(f"backend RECOVERED (latency {latency}ms)")
+                was_up = True
+                last_up_iso = datetime.now().isoformat(timespec="seconds")
+            else:
+                if was_up:
+                    # alive→down transition: forensics FIRST (evidence decays)
+                    report = write_death_report(last_up_iso)
+                    if stop_marker_fresh():
+                        log("backend DOWN but intentional-stop marker is fresh — no restart, no alert")
+                    elif "workspace_suspension" in report.get("classification", ""):
+                        log("workspace-level freeze detected — in-workspace restart is futile")
+                        telegram_alert(
+                            "🟣 UltraBot: WORKSPACE-LEVEL FREEZE detected "
+                            f"({datetime.now().strftime('%H:%M:%S')} IST). "
+                            "Backend + canaries all stopped. Needs platform-level attention."
+                        )
+                    else:
+                        bump = restarts_today()
+                        if bump >= MAX_RESTARTS_PER_DAY:
+                            log(f"restart cap reached ({bump}/{MAX_RESTARTS_PER_DAY}) — NOT restarting")
+                            telegram_alert(
+                                "🔴 UltraBot: backend DOWN and restart cap reached "
+                                f"({bump} today). Manual attention needed."
+                            )
+                        else:
+                            wait = min(BACKOFF_BASE * (2 ** backoff_n), BACKOFF_CAP)
+                            log(f"backend DOWN — restarting in {wait:.0f}s "
+                                f"(restart {bump + 1}/{MAX_RESTARTS_PER_DAY})")
+                            telegram_alert(
+                                "🔴 UltraBot: backend died unexpectedly at "
+                                f"{datetime.now().strftime('%H:%M:%S')} IST "
+                                f"(last seen up {last_up_iso}). Auto-restarting in {wait:.0f}s."
+                            )
+                            time.sleep(wait)
+                            start_backend()
+                            bump_restart_counter()
+                            backoff_n += 1
+                    was_up = False
+                else:
+                    # still down across polls — try recovery if cap allows
+                    if not stop_marker_fresh():
+                        bump = restarts_today()
+                        if bump < MAX_RESTARTS_PER_DAY and backoff_n < 4:
+                            wait = min(BACKOFF_BASE * (2 ** backoff_n), BACKOFF_CAP)
+                            log(f"backend still DOWN — retry in {wait:.0f}s")
+                            time.sleep(wait)
+                            start_backend()
+                            bump_restart_counter()
+                            backoff_n += 1
+
+            if up:
+                backoff_n = 0
+
+            spawn_canaries()
+            if time.time() - last_snap > SNAPSHOT_INTERVAL:
                 snapshot()
                 last_snap = time.time()
         except Exception as exc:
             log(f"watchdog error: {exc}")
-        time.sleep(60)
+        time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
