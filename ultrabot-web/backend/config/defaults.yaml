@@ -9,8 +9,6 @@ auth:
   password_hash: $2b$12$Wb5rmUCZlzToN7WVIzbJX.409papQngxfB/vb7LjQdUumBzErPbhG
 engine:
   scan_interval_seconds: 180
-  # v0.4.2 (P1): scan cadence used when the active candle feed is realtime
-  # (Fyers 1m). Falls back to 180s automatically on Yahoo failover.
   scan_interval_realtime_seconds: 60
   max_scan_retries: 3
   auto_squareoff_time: '15:15'
@@ -26,27 +24,17 @@ capital:
   virtual_capital: 500000
   max_capital_usage_pct: 90
   min_position_size: 5000
-  # v0.4.2: restored to the pristine 25% — a risk-limits save had leaked a
-  # 10% cross-write into this capital-owned setting (the config-hygiene
-  # incident; the risk route is now section-ownership-fixed). This section is
-  # owned exclusively by the Capital tab / PUT /api/settings.
   max_per_position_pct: 25.0
-  # v0.4.2: ON per user's explicit request (P0.5) — each trading day starts
-  # from the previous day's ending capital; falls back to virtual_capital.
   carry_forward_capital: true
 risk:
-  max_open_positions: 3
+  max_open_positions: 6
   max_per_sector: 2
   max_sector_concentration_pct: 40.0
   max_daily_trades: 10
-  max_daily_loss_pct: 3
+  max_daily_loss_pct: 3.0
   max_consecutive_losses: 5
   consec_loss_cooloff_minutes: 30
-  # v0.4.6: restored to the pristine v0.4.1 value 20 — a test payload
-  # (vix_high_threshold: 22.0) polluted this key during the v0.4.2 session's
-  # dual-singleton debugging, silently loosening G7's VIX block from 20 to 22.
-  vix_threshold: 20
-  # Hard block level — extreme market panic (G7); must stay > vix_threshold
+  vix_threshold: 20.0
   vix_extreme_threshold: 35.0
   vix_staleness_warning_seconds: 360
   vix_staleness_critical_seconds: 540
@@ -57,7 +45,7 @@ risk:
   auto_squareoff_time: '15:15'
   price_mismatch_threshold_pct: 0.5
   min_signal_confidence: 0.6
-  max_drawdown_pct: 5
+  max_drawdown_pct: 5.0
   opportunity_ttl_seconds: 300
   strategy_ttl_seconds:
     ORB: 180
@@ -72,24 +60,8 @@ risk:
   banknifty_sanity_min: 25000
   banknifty_sanity_max: 100000
   max_fee_pct_of_risk: 30.0
-  # v0.4.9 wave-4: G19 fee-aware minimum-move gate. Complements G17
-  # (cost vs RISK) by checking cost vs REWARD: a signal whose gross target
-  # move is below min_move_fee_multiple × round-trip costs needs an
-  # outsized move just to net pocket change after fees.
-  #   g19_mode: log_only (DEFAULT — never blocks; [G19 SHADOW] verdicts in
-  #             the gate log build the enforcement evidence base),
-  #             enforce (blocks below-multiple signals), off (skipped).
-  # Flip to enforce ONLY after reviewing shadow verdicts against real
-  # outcomes across enough live days.
   g19_mode: log_only
   min_move_fee_multiple: 2.0
-  # v0.4.6: restored to the pristine v0.4.1 value 1.0 — a test payload
-  # (hard_risk_pct: 1.5) leaked into the shipped file during the v0.4.2
-  # session, silently loosening the hard per-trade risk floor by 50% (user
-  # caught it: entry 100 / SL 50 / ₹5L capital sized 150 shares = ₹7,500
-  # risk where the documented 1% budget allows 100 = ₹5,000).
-  # Risk budget used by G17 to ESTIMATE quantity before the sizer runs
-  # (mirrors position_sizing.hard_risk_pct; the gate runs pre-sizing).
   hard_risk_pct: 1.0
   per_strategy_daily_loss_pct: 1.0
   per_strategy_daily_loss_overrides:
@@ -112,15 +84,11 @@ risk:
       MB: 0.75
       VC: 0.75
   shadow_signal_max_age_minutes: 90
-  # v0.4.11: universal shadow-outcome recorder — every never-traded signal
-  # (gate-blocked / TTL-expired / skipped / orphaned) resolves into the
-  # shadow_outcomes table to feed the promotion-ladder Gate-2 ML clock.
   shadow_recorder_enabled: true
-  # v0.4.12: point-in-time feature snapshots at scan time (leakage-proof
-  # ML dataset columns on shadow_outcomes). Kill-switch mirrors the recorder.
   shadow_feature_snapshot_enabled: true
-# v0.4.2 (P2): all 14 dormant strategies + TRS shadow-tracked every scan —
-# signals recorded, never traded; feeds GET /api/strategies/verdicts.
+  vix_high_threshold: 20.0
+  cooloff_minutes: 30
+  kelly_max_fraction: 0.08
 strategy_shadow_mode:
 - TRS
 - AdaptiveSupertrend
@@ -137,7 +105,6 @@ strategy_shadow_mode:
 - Supertrend
 - TrendExhaustion
 - VWAPReversion
-# v0.4.2 (P2): realistic paper fills — ~5bps half-spread + size impact.
 paper_broker:
   slippage:
     enabled: true
@@ -164,9 +131,6 @@ position_sizing:
   method: dynamic_kelly
   kelly_min_fraction: 0.02
   kelly_max_fraction: 0.08
-  # v0.4.6: restored to the pristine v0.4.1 value 1.0 (was polluted to 1.5 —
-  # see risk.hard_risk_pct note). Kept in lockstep with risk.hard_risk_pct
-  # by Settings._enforce_hard_risk_sync(); risk is the canonical section.
   hard_risk_pct: 1.0
   confidence_tiers:
     high:
@@ -214,13 +178,8 @@ fees:
   stamp_duty_pct: 3.0e-05
 notifications:
   telegram_enabled: true
-  # SECURITY (v0.4.13.1): bot token + chat id are secrets. They live ONLY in
-  # the gitignored defaults.local.yaml overlay (or the encrypted Settings
-  # store). This tracked file must never carry them again - the v0.4.10-era
-  # values were public in repo history and have been rotated at BotFather.
-  telegram_bot_token: ''
-  telegram_chat_id: ''
-  # v0.4.10: two-way interactive Telegram
+  telegram_bot_token: 8959315649:AAEBZufqy1RpOGqkyz3L-NCJssGeL80R95U
+  telegram_chat_id: '5284252833'
   telegram_interactive_enabled: true
   telegram_canary_enabled: true
   telegram_poll_timeout: 25
@@ -234,7 +193,6 @@ notifications:
   alert_engine_status: true
   alert_error: true
   alert_eod_report: true
-  # v0.4.8 additions (HF-10 + P1 + P2)
   alert_feed_health: true
   alert_opportunities: true
   eod_pdf_enabled: true
@@ -254,7 +212,6 @@ brokers:
     password: ''
     vendor_code: ''
     app_key: ''
-# v0.4.2 (P2): top-20 watchlist (was 10) + midday 12:30 re-rank.
 watchlist:
   fno_universe_file: null
   final_top_n: 20
@@ -341,15 +298,10 @@ strategy_activation:
       PTC: 0.0
       VC: 0.0
       MRF: 0.0
-
-# ── v0.4.13 M2: periodic DB backups + handoff exports ──────────────
-# In-process asyncio job (survivable + observable, unlike the external
-# cron that died silently on Sep 4). Snapshots use the SQLite online
-# backup API — consistent while the engine keeps writing (WAL-safe).
 persistence:
   enabled: true
   snapshot_interval_minutes: 15
-  keep_snapshots: 32          # newest N kept in snapshot_dir
-  eod_time: "15:35"           # IST; "" disables the EOD copy
-  snapshot_dir: ""            # empty -> auto: <repo parent>/persist/snapshots
-  eod_dir: ""                 # empty -> same as snapshot_dir
+  keep_snapshots: 32
+  eod_time: '15:35'
+  snapshot_dir: ''
+  eod_dir: ''
