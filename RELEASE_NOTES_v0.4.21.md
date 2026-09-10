@@ -91,3 +91,39 @@ Position rehydration (proven since v0.4.13) makes a restart strictly better than
 3. On a telegram-poll death: in-process respawn (up to 5/day) + **TELEGRAM POLL not responding** watchdog alert if staleness persists past the long-poll floor.
 4. A hung `/command` now times out after 30s (logged, skipped) — subsequent messages keep flowing.
 5. Watchdog state files: `watchdog_stall_restarts.json` (new) joins `watchdog_restarts.json`; new `/api/health` keys: `loop_never_beat`, `telegram_poll_*`.
+
+## 5. Wave 3 (2026-09-10, post-deploy log forensics) — the actual leak trigger
+
+User-supplied production logs pinned the GC storm to its source:
+
+```
+candles.py:288: RuntimeWarning: coroutine 'Repository.close' was never awaited
+sqlalchemy.pool.impl.NullPool - ERROR - The garbage collector is trying to clean up
+non-checked-in connection <AdaptedConnection <Connection(Thread-2884, ...)>> ...
+brokers/fyers.py:332: SAWarning: ... (Thread-2884 ...)
+```
+
+**Root cause — `api/routes/candles.py::_get_fyers_quotes_broker()`:** the hand-rolled
+session cleanup ran `asyncio.iscoroutine(res)` WITHOUT an in-scope `asyncio` import
+(the module only imported asyncio inside a *different* function). The `NameError`
+was silently eaten by `except Exception: pass`, so `await repo.close()` never ran.
+Consequences, on **every `/api/live-quotes` poll** (header banner: ~3s per open tab):
+
+1. `Repository.close` coroutine created but never awaited (RuntimeWarning),
+2. `AsyncSession` never closed → with `NullPool` its aiosqlite connection dropped by
+   the GC (SAWarning / NullPool-ERROR bursts at hot frames like `fyers.py:332`),
+3. each dropped aiosqlite connection stranded its dedicated daemon thread —
+   the Thread-28xx/43xx storm and mounting memory.
+
+Wave 2's shielded, idempotent `Repository.close()` protected every *other* call
+site but could not help here — the coroutine was never awaited at all.
+
+**Fix:** session lifecycle now owned by context managers —
+`async with async_session_factory() as session: async with Repository(session) as repo:`
+— closing on success, error, AND cancellation paths; `import asyncio` added at
+module scope as tripwire prevention.
+
+**Tests:** new `tests/test_candles_quotes_broker_lifecycle.py` — 5 tests (success +
+cached second poll, no-credentials path, credential-fetch raises, empty blob,
+module-scope asyncio tripwire). Verified to **fail 5/5 on the pre-fix code** and
+pass 5/5 on the fix.
