@@ -205,17 +205,84 @@ async def _execute_backtest(req: BacktestRequest) -> Dict[str, Any]:
                     exit_price = target * (1 - slippage_pct) if direction == "LONG" else target * (1 + slippage_pct)
 
                 # Check 4-Stage Partial Booking triggers
+                # v0.4.20 CP-05b: partial legs are now REAL — the booked
+                # tranche is banked (gross − its own round-trip fees),
+                # remaining_qty actually shrinks, and each leg gets its own
+                # trade-log row. The pre-fix code only tightened the SL while
+                # keeping 100% of the position open to the final exit, so
+                # backtests overstated exposure and hid the stage P&L profile.
                 else:
-                    booking_res = booker.check_and_book(
-                        type("Pos", (), {"entry_price": entry_price, "sl_price": sl, "direction": direction})(),
-                        close,
-                    )
+                    _bt_stage_stub = type(
+                        "Pos", (),
+                        {
+                            "entry_price": entry_price,
+                            "sl_price": sl,
+                            "stop_loss": sl,
+                            "direction": direction,
+                            "quantity": remaining_qty,
+                            "initial_quantity": active_trade.get("initial_qty", remaining_qty),
+                            "stages_fired": active_trade.get("stages_fired", []),
+                            "peak_price": active_trade.get("peak_price", 0) or 0,
+                            "extra": {},
+                        },
+                    )()
+                    booking_res = booker.check_and_book(_bt_stage_stub, close)
                     if booking_res.trailing_sl_active and booking_res.current_trailing_sl:
                         # Tighten Stop-Loss
                         if direction == "LONG":
                             active_trade["stop_loss"] = max(active_trade["stop_loss"], booking_res.current_trailing_sl)
                         else:
                             active_trade["stop_loss"] = min(active_trade["stop_loss"], booking_res.current_trailing_sl)
+
+                    _bt_level = int(booking_res.triggered_level or 0)
+                    _bt_book_qty = int(booking_res.book_qty or 0)
+                    if _bt_level > 0 and _bt_book_qty > 0:
+                        _bt_book_qty = min(_bt_book_qty, remaining_qty)
+                    if _bt_level > 0 and _bt_book_qty > 0:
+                        _bt_buy_px = entry_price if direction == "LONG" else close
+                        _bt_sell_px = close if direction == "LONG" else entry_price
+                        _bt_fees = float(
+                            fee_calc.calculate_equity_intraday(_bt_buy_px, _bt_sell_px, _bt_book_qty).get("total", 0.0)
+                        )
+                        _bt_gross = (
+                            (close - entry_price) * _bt_book_qty
+                            if direction == "LONG"
+                            else (entry_price - close) * _bt_book_qty
+                        )
+                        _bt_net = round(_bt_gross - _bt_fees, 2)
+                        running_capital += _bt_net
+                        remaining_qty -= _bt_book_qty
+                        active_trade["remaining_qty"] = remaining_qty
+                        active_trade["stages_fired"] = list(booking_res.stages_fired or [])
+                        active_trade["peak_price"] = float(booking_res.peak_price or close)
+                        _bt_leg = {
+                            "id": f"BT-{len(trade_log)+1}",
+                            "symbol": sym,
+                            "direction": direction,
+                            "entry_date": active_trade["entry_date"],
+                            "exit_date": bar_date,
+                            "entry_price": round(entry_price, 2),
+                            "exit_price": round(close, 2),
+                            "quantity": _bt_book_qty,
+                            "gross_pnl": round(_bt_gross, 2),
+                            "fees": round(_bt_fees, 2),
+                            "net_pnl": _bt_net,
+                            "pnl_pct": round(_bt_net / (entry_price * _bt_book_qty) * 100, 2) if entry_price > 0 else 0,
+                            "exit_reason": f"PARTIAL_L{_bt_level}",
+                            "capital_after": round(running_capital, 2),
+                        }
+                        trade_log.append(_bt_leg)
+                        equity_curve.append({
+                            "bar": len(equity_curve),
+                            "date": bar_date,
+                            "capital": round(running_capital, 2),
+                            "pnl": _bt_net,
+                            "trade_id": _bt_leg["id"],
+                        })
+                        if remaining_qty <= 0:
+                            # Stage exhaustion — every tranche is banked; the
+                            # round trip is complete with no final leg.
+                            active_trade = None
 
                 if closed:
                     # Calculate gross PnL & NSE fees
@@ -265,27 +332,12 @@ async def _execute_backtest(req: BacktestRequest) -> Dict[str, Any]:
                     except Exception:
                         signal = None
 
-                # Fallback to MA momentum breakout if strategy has strict multi-parameter filters
-                if signal is None and len(window_df) >= 20:
-                    ma20 = window_df["close"].rolling(20).mean().iloc[-1]
-                    prev_c = window_df["close"].iloc[-2]
-                    curr_c = window_df["close"].iloc[-1]
-                    if curr_c > ma20 and prev_c <= ma20:
-                        signal = {
-                            "direction": "BUY",
-                            "entry_price": curr_c,
-                            "stop_loss": curr_c * 0.985,
-                            "target": curr_c * 1.03,
-                            "confidence": 0.65,
-                        }
-                    elif curr_c < ma20 and prev_c >= ma20:
-                        signal = {
-                            "direction": "SELL",
-                            "entry_price": curr_c,
-                            "stop_loss": curr_c * 1.015,
-                            "target": curr_c * 0.97,
-                            "confidence": 0.65,
-                        }
+                # v0.4.20 CP-05a: the 20-MA crossover FALLBACK is REMOVED.
+                # The pre-fix code fabricated generic MA-cross trades (hard-
+                # coded 0.65 confidence) whenever the selected strategy was
+                # silent, then attributed those trades to the strategy —
+                # every complex-strategy backtest reported fictional results.
+                # Honest behavior: strategy silent → NO_TRADE this bar.
 
                 if signal and signal.get("direction"):
                     direction = signal.get("direction", "LONG").upper()
@@ -315,6 +367,10 @@ async def _execute_backtest(req: BacktestRequest) -> Dict[str, Any]:
                         "quantity": qty,
                         "remaining_qty": qty,
                         "entry_date": bar_date,
+                        # v0.4.20 CP-05b: partial-booking state carried per trade
+                        "initial_qty": qty,
+                        "stages_fired": [],
+                        "peak_price": 0,
                     }
 
     # 3. Compute Summary Statistics
