@@ -4562,13 +4562,31 @@ class UltraBotEngine:
         except Exception:
             pass
 
-        # If fully exited, close the position
+        # v0.4.20 CP-02/CP-04 fix: sync the IN-MEMORY quantity too. Only the
+        # DB row was shrunk (update_position above) while the caller's ORM
+        # object kept the ORIGINAL quantity — so a close that reused this
+        # object (partial_complete below, or any same-cycle SL/target/manual
+        # close) placed the exit order and computed the ledger P&L on the
+        # FULL original quantity, overselling the booked tranche (net short)
+        # and double-counting booked P&L (CP-02/CP-04 from the Sep-10
+        # external review, both verified live in this file).
+        try:
+            position.quantity = int(remaining_qty)
+            position.remaining_qty = int(remaining_qty)
+        except Exception:
+            pass
+
+        # If fully exited, close the position. v0.4.20: pass close_qty=0 —
+        # nothing remains at the broker, so _close_position must NOT place
+        # another exit order (the pre-fix code exited the ORIGINAL quantity
+        # here, creating a phantom reverse position, see CP-02).
         if remaining_qty <= 0:
             await self._close_position(
                 position=position,
                 exit_price=current_price,
                 close_reason="partial_complete",
                 pnl_amount=pnl_amount,
+                close_qty=0,
             )
 
         # --- Broadcast & Telegram Partial Booking ---
@@ -4602,6 +4620,7 @@ class UltraBotEngine:
         close_reason: str,
         pnl_amount: float = 0,
         pnl_pct: float = 0,
+        close_qty: int = None,
     ) -> None:
         """Close a position and update the corresponding trade.
 
@@ -4612,7 +4631,20 @@ class UltraBotEngine:
         buggy direction logic (the auto-squareoff scheduler shipped with an
         inverted one for BUY positions) or a caller that passes no P&L at
         all (the manual-close API route) can no longer corrupt the books.
+
+        v0.4.20 (CP-02/CP-04): ``close_qty`` — the quantity that is ACTUALLY
+        being exited in this final leg. Defaults to ``position.quantity``
+        (post-v0.4.18 DB rows keep quantity == remaining_qty, and partial
+        booking now syncs the in-memory object). Pass 0 for
+        ``partial_complete``: every share was already booked, so NO exit
+        order is placed, exit fees are 0 and the ledger round trip is made
+        up of the accumulated partial legs only.
         """
+        # Resolve the effective exit quantity (CP-02/CP-04).
+        if close_qty is None:
+            close_qty = int(getattr(position, "quantity", 0) or 0)
+        close_qty = max(0, int(close_qty))
+
         # Execute exit order via broker
         exit_success = True
         exit_err_msg = None
@@ -4620,13 +4652,13 @@ class UltraBotEngine:
         # recorded P&L matches broker fills (slippage / live LTP divergence).
         effective_exit_price = float(exit_price)
         try:
-            if self.broker is not None and hasattr(self.broker, "place_order"):
+            if self.broker is not None and hasattr(self.broker, "place_order") and close_qty > 0:
                 exit_tx_type = "SELL" if str(position.direction).upper() in ("LONG", "BUY") else "BUY"
                 order_res = await self.broker.place_order(
                     symbol=position.symbol,
                     exchange=self._derive_order_exchange(self._position_segment(position)),
                     transaction_type=exit_tx_type,
-                    quantity=position.quantity,
+                    quantity=close_qty,
                     price=exit_price,
                     order_type="MARKET",
                 )
@@ -4682,6 +4714,9 @@ class UltraBotEngine:
             return
 
         # Calculate fees for exit using NSEFeeCalculator
+        # v0.4.20: qty-0 closes (partial_complete) place NO order, so there is
+        # NO exit-leg brokerage either — the calculator's flat ₹40 would be a
+        # phantom charge on top of the partial legs' own fees.
         fees_config = self.config.get_fees_config() if hasattr(self.config, "get_fees_config") else {}
         brokerage = float(fees_config.get("brokerage_per_order", 20.0))
         from fees.nse_fee_calculator import NSEFeeCalculator
@@ -4690,13 +4725,16 @@ class UltraBotEngine:
         _close_is_long = _is_long_direction(position.direction)
         buy_price = position.entry_price if _close_is_long else effective_exit_price
         sell_price = effective_exit_price if _close_is_long else position.entry_price
-        fee_breakdown = fee_calc.calculate_equity_intraday(
-            buy_price=buy_price,
-            sell_price=sell_price,
-            quantity=int(position.quantity),
-            brokerage_per_order=brokerage,
-        )
-        exit_fees = float(fee_breakdown.get("total", 0.0))
+        if close_qty > 0:
+            fee_breakdown = fee_calc.calculate_equity_intraday(
+                buy_price=buy_price,
+                sell_price=sell_price,
+                quantity=close_qty,
+                brokerage_per_order=brokerage,
+            )
+            exit_fees = float(fee_breakdown.get("total", 0.0))
+        else:
+            exit_fees = 0.0
 
         async with self._repo_context() as repo:
             # CORRECTION (live-run-2): calculate_equity_intraday() above
@@ -4755,7 +4793,13 @@ class UltraBotEngine:
             # for every BUY position). Recomputing here makes _close_position
             # self-sufficient and correct regardless of caller.
             _close_entry = float(getattr(position, "entry_price", 0) or 0)
-            _close_qty = float(getattr(position, "quantity", 0) or 0)
+            # v0.4.20 CP-04: compute the final leg on the EFFECTIVE exit
+            # quantity (remaining tranche only) — the pre-fix code used the
+            # position's (possibly stale) full quantity and then added the
+            # partial legs' gross on top, double-counting every booked
+            # tranche. With close_qty=0 (partial_complete) the final leg is
+            # flat 0 and the round trip is the partial legs alone.
+            _close_qty = float(close_qty)
             if _close_is_long:
                 effective_pnl = (effective_exit_price - _close_entry) * _close_qty
             else:

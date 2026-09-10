@@ -9,7 +9,7 @@ import {
   notifyTradeFill,
 } from '@/lib/desktopNotifications';
 import { addConfirmedOppId } from '@/lib/tradeExecution';
-import { removeStoredExpiredOppId } from '@/lib/opportunityStorage';
+import { removeStoredExpiredOppId, saveStoredExpiredOppId } from '@/lib/opportunityStorage';
 
 interface UseWebSocketOptions {
   autoConnect?: boolean;
@@ -63,6 +63,20 @@ export function useWebSocket(options: UseWebSocketOptions = {}): UseWebSocketRet
         const oppId = data.opportunity_id || data.id;
         if (oppId) {
           store.realtime.removeOpportunity(oppId);
+          // v0.4.20 (user report: expired opportunities vanished instead of
+          // landing in the Expired list): the pre-fix handler ONLY removed
+          // the card from the pending store. The engine's invalidation
+          // broadcast now ALSO records the id (+ reason) in localStorage so
+          // the card is instantly marked expired by mapRawToOpportunityData
+          // and survives page reloads — even before the next
+          // /api/opportunities/invalidated poll (which is now restart-
+          // durable, served from the signals table).
+          if (data.type === 'opportunity_invalidated') {
+            try {
+              const reason = data.reason || data.invalidation_reason || data.reason_code || 'Setup expired (TTL elapsed)';
+              saveStoredExpiredOppId(String(oppId), String(reason));
+            } catch { }
+          }
         }
       } else if (data.type === 'new_opportunity' && data.opportunity) {
         store.realtime.addOpportunity(data.opportunity);
