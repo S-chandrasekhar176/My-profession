@@ -6,7 +6,9 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -15,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
+from core.market_hours import IST
 from db.database import init_db, async_session_factory
 from db.repository import Repository
 from errors.error_engine import ErrorEngine
@@ -283,6 +286,13 @@ async def lifespan(app: FastAPI):
     catchup_task = asyncio.create_task(market_scheduler.run_startup_catchup())
     app.state.scheduler_catchup_task = catchup_task
 
+    # v0.4.18: EOD DailySummary catch-up. The 15:30 cron never backfills, so
+    # whenever the backend died before market close (the Sep-8/9 silent-death
+    # pattern) daily_summary stayed empty for the day despite a complete
+    # trades ledger. On boot after 15:30 IST with no row for today, write it.
+    eod_catchup_task = asyncio.create_task(market_scheduler.run_eod_summary_catchup())
+    app.state.eod_summary_catchup_task = eod_catchup_task
+
     # HOTFIX #8 (live 2026-09-01): crash-aware engine auto-resume.
     # Resilience drill proved that a process kill leaves the session record in
     # status="running" (graceful stops write status="stopped", completed days
@@ -398,6 +408,24 @@ async def health():
     except Exception:
         pass
 
+    # v0.4.18 loop-liveness: expose the main-loop stall age on the
+    # UNAUTHENTICATED health endpoint so session_watchdog (which has no API
+    # credentials) can alert when the engine state is "running"-like but the
+    # loop has stopped iterating (the invisible Sep-9 13:35 failure mode).
+    # A running engine with a stale beat renders degraded here.
+    loop_stalled = None
+    try:
+        eng = getattr(app.state, "engine", None)
+        if eng is not None:
+            beat = getattr(eng, "_loop_last_beat", None)
+            state_val = getattr(getattr(eng, "state", None), "value", "")
+            if beat is not None and state_val in ("running", "paused", "scanning"):
+                loop_stalled = round(
+                    (datetime.now(IST) - beat).total_seconds(), 1
+                )
+    except Exception:
+        loop_stalled = None
+
     try:
         from db.database import async_session_factory
         from sqlalchemy import text
@@ -415,6 +443,7 @@ async def health():
         "engine": engine_status,
         "broker": broker_status,
         "feed": feed_status,
+        "loop_stalled_seconds": loop_stalled,
     }
 
 

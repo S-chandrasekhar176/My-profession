@@ -514,6 +514,11 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
   // Poll the live quote every 3s while the modal is open: update the LTP
   // header, extend the FORMING candle, and move the LTP price line — all
   // without rebuilding the chart.
+  // v0.4.18 (Issue 11 — realtime bars): the 3s tick only extends the LAST
+  // candle; when a bar completes a NEW candle must appear, otherwise the
+  // chart crawled one bar at a time and felt simulated. A 30s full refetch
+  // (combined with the v0.4.18 realtime Fyers quotes feeding `tick`) makes
+  // both the forming candle and the bar history follow the broker tape.
   useEffect(() => {
     if (!isOpen || !trade?.symbol) return;
     let cancelled = false;
@@ -562,11 +567,16 @@ export function TradingViewChartModal({ isOpen, onClose, trade }: TradingViewCha
 
     tick();
     const interval = setInterval(tick, 3000);
+    // v0.4.18: full candle refetch every 30s — completed bars roll in.
+    const refetchInterval = setInterval(() => {
+      if (!cancelled) fetchCandles();
+    }, 30000);
     return () => {
       cancelled = true;
       clearInterval(interval);
+      clearInterval(refetchInterval);
     };
-  }, [isOpen, trade?.symbol]);
+  }, [isOpen, trade?.symbol, fetchCandles]);
 
   if (!trade) return null;
 

@@ -102,6 +102,32 @@ def health_ok() -> tuple[bool, int]:
         return False, -1
 
 
+# v0.4.18: loop-liveness stall detection. A backend can answer /api/health
+# (process alive) while the engine's main loop is wedged — the invisible
+# Sep-9 13:35 failure: UI said "scanning" for 2 hours while nothing scanned.
+# /api/engine/status now exposes loop_stalled_seconds; alert (but do NOT
+# restart — a stall is not a death) when it exceeds the threshold.
+LOOP_STALL_ALERT_SECONDS = 300.0
+
+
+def loop_stalled_seconds() -> float | None:
+    """loop_stalled_seconds from the unauthenticated /api/health payload
+    (the engine/status endpoint requires API credentials the watchdog does
+    not hold), or None if unavailable."""
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(BASE + "/api/health", timeout=5) as r:
+            if r.status != 200:
+                return None
+            import json as _json
+
+            data = _json.loads(r.read().decode("utf-8", "replace"))
+            raw = data.get("loop_stalled_seconds")
+            return float(raw) if raw is not None else None
+    except Exception:
+        return None
+
+
 # ────────────────────────────────────────────
 # Canary management + freshness
 # ────────────────────────────────────────────
@@ -347,6 +373,7 @@ def main() -> None:
     last_up_iso = datetime.now().isoformat(timespec="seconds")
     was_up = True
     backoff_n = 0
+    loop_stall_alerted = False
 
     while True:
         try:
@@ -358,6 +385,23 @@ def main() -> None:
                     log(f"backend RECOVERED (latency {latency}ms)")
                 was_up = True
                 last_up_iso = datetime.now().isoformat(timespec="seconds")
+
+                # v0.4.18: loop-stall alert (edge-triggered, no restart).
+                try:
+                    stalled = loop_stalled_seconds()
+                    if stalled is not None and stalled >= LOOP_STALL_ALERT_SECONDS and not loop_stall_alerted:
+                        loop_stall_alerted = True
+                        log(f"ENGINE LOOP STALLED {stalled:.0f}s (process alive) — alerting")
+                        telegram_alert(
+                            "🟠 UltraBot: ENGINE LOOP STALLED — backend answers but the "
+                            f"main loop has not iterated for {stalled:.0f}s "
+                            f"({datetime.now().strftime('%H:%M:%S')} IST). "
+                            "Positions/exits are NOT being managed. Manual restart recommended."
+                        )
+                    elif stalled is not None and stalled < LOOP_STALL_ALERT_SECONDS:
+                        loop_stall_alerted = False
+                except Exception:
+                    pass
             else:
                 if was_up:
                     # alive→down transition: forensics FIRST (evidence decays)

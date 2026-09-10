@@ -222,6 +222,71 @@ class FyersBroker(BaseBroker):
             logger.warning("Failed to fetch Fyers LTP for %s: %s", symbol, exc)
             return 0.0
 
+    async def get_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """v0.4.18: bulk REALTIME quotes via the Fyers quotes endpoint.
+
+        Unlike get_ltp() (which callers sometimes back with minute-close
+        candle feeds) this hits the broker's live quotes API directly — the
+        same tape the Fyers terminal shows — and returns per-symbol
+        price / change / changePct / previousClose in ONE request.
+
+        Args:
+            symbols: engine symbols (NIFTY, SENSEX, RELIANCE, ...) or
+                already-formatted Fyers identifiers ("NSE:NIFTY50-INDEX").
+
+        Returns:
+            {original_symbol: {price, change, changePct, previousClose}}
+            — only symbols Fyers actually returned are present. Never raises.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        if not symbols:
+            return out
+        try:
+            from feeds.fyers_candles import to_fyers_symbol
+
+            fy_map = {sym: to_fyers_symbol(sym) for sym in symbols}
+            client = self._get_client()
+            data = await self._call(
+                _data_limiter, client.quotes, {"symbols": ",".join(fy_map.values())}
+            )
+            if not (isinstance(data, dict) and data.get("s") == "ok" and data.get("d")):
+                return out
+            by_fy_sym = {str(item.get("n", "")).upper(): item for item in data["d"]}
+            for orig, fy_sym in fy_map.items():
+                item = by_fy_sym.get(fy_sym.upper())
+                if not item or str(item.get("s", "")) != "ok":
+                    continue
+                v = item.get("v", {}) or {}
+                try:
+                    price = float(v.get("lp", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                if price <= 0:
+                    continue
+                prev_close = v.get("prev_close_price")
+                try:
+                    prev_close = float(prev_close) if prev_close is not None else 0.0
+                except (TypeError, ValueError):
+                    prev_close = 0.0
+                change = v.get("ch")
+                if change is None:
+                    change = (price - prev_close) if prev_close > 0 else 0.0
+                change_pct = v.get("chp")
+                if change_pct is None:
+                    change_pct = round((change / prev_close) * 100, 2) if prev_close > 0 else 0.0
+                try:
+                    out[orig] = {
+                        "price": round(price, 2),
+                        "change": round(float(change), 2),
+                        "changePct": round(float(change_pct), 2),
+                        "previousClose": round(prev_close, 2),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        except Exception as exc:
+            logger.warning("Fyers bulk quotes failed for %s: %s", symbols, exc)
+        return out
+
     async def get_candles(
         self,
         symbol: str,

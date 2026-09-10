@@ -328,6 +328,11 @@ class SessionManager:
             await repo.update_session(
                 session_id,
                 status=status,
+                # v0.4.18: stamp end_time — the column existed but close_session
+                # only wrote status/metadata, so every session row in the DB
+                # had end_time=NULL and session-duration forensics (e.g. the
+                # Sep-9 stall timeline) had to guess from created_at/updated_at.
+                end_time=datetime.now(IST).isoformat(),
                 metadata_json=meta,
             )
 

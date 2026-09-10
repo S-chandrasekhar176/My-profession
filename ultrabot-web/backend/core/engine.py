@@ -212,6 +212,14 @@ class UltraBotEngine:
         self._signals_passed_count: int = 0
         self._signals_rejected_count: int = 0
         self._trades_executed: int = 0
+        # v0.4.18 loop-liveness beat: refreshed at the TOP of every main-loop
+        # iteration and surfaced via /api/engine/status as
+        # loop_stalled_seconds. The Sep-9 hard stall (loop dead post-restart
+        # while the UI happily reported "scanning") was invisible because no
+        # observable distinguished "loop alive" from "process alive".
+        self._loop_last_beat: Optional[datetime] = None
+        # v0.4.18: dedupe key for daily-risk-halt risk_events (see main loop).
+        self._last_risk_block_event: Optional[str] = None
         self._errors_count: int = 0
         self._feed_alerted_down: bool = False
         self._rejections_by_gate: Dict[str, int] = {}
@@ -1115,6 +1123,8 @@ class UltraBotEngine:
 
         while self.state in (EngineState.RUNNING, EngineState.PAUSED, EngineState.SCANNING):
             iteration_start = datetime.now(IST)
+            # v0.4.18 loop-liveness beat (see __init__ note).
+            self._loop_last_beat = iteration_start
 
             try:
                 # --- Step 1: Market check ---
@@ -1175,6 +1185,22 @@ class UltraBotEngine:
                         capital_in_use=_capital_in_use,
                     )
                     risk_ok = risk_status.can_take_new_trades
+
+                    # v0.4.18: persist daily-risk HALTS into risk_events once
+                    # per distinct block_reason (not per iteration — this
+                    # branch runs every scan cadence while blocked).
+                    _block_reason = getattr(risk_status, "block_reason", None)
+                    if not risk_ok and _block_reason and _block_reason != getattr(self, "_last_risk_block_event", None):
+                        self._last_risk_block_event = _block_reason
+                        await self._persist_risk_event(
+                            event_type="DAILY_RISK_HALT",
+                            severity="critical",
+                            message=str(_block_reason),
+                            value=float(getattr(risk_status, "net_pnl", 0.0) or 0.0),
+                            action_taken="new_trades_blocked",
+                        )
+                    elif risk_ok and getattr(self, "_last_risk_block_event", None):
+                        self._last_risk_block_event = None
 
                     await self._broadcast("risk", {
                         "type": "daily_risk_update",
@@ -1774,6 +1800,16 @@ class UltraBotEngine:
                     logger.info(
                         "Signal from %s on %s blocked by risk: %s",
                         strategy_name, symbol, reason_msg,
+                    )
+                    # v0.4.18: DB trail for gate blocks (risk_events was
+                    # write-never since v0.3 — see _persist_risk_event).
+                    await self._persist_risk_event(
+                        event_type=f"GATE_BLOCKED:{block_gate}",
+                        severity="warning",
+                        message=reason_msg,
+                        symbol=symbol,
+                        strategy=strategy_name,
+                        action_taken="signal_rejected",
                     )
                     # v0.4.11 ML clock: gate-blocked signals finally enter
                     # the shadow dataset (Friday 2026-09-04 burned ~197 such
@@ -2404,6 +2440,16 @@ class UltraBotEngine:
         daily_loss = abs(daily_status.net_pnl) if daily_status and daily_status.net_pnl < 0 else 0.0
         daily_pnl = float(daily_status.net_pnl) if daily_status else -daily_loss
         daily_trades = daily_status.total_trades if daily_status else 0
+        # v0.4.18 G4 semantics fix: daily_status.total_trades counts CLOSED
+        # trades only, so with 10 open-but-unclosed entries the gate kept
+        # passing (live Sep-9: gate saw 8 closed at 11:41 yet 13 entries were
+        # allowed against a cap of 10). Count ENTRIES: max(closed, entries
+        # executed today) — _trades_executed is restored from the DB ledger
+        # on same-day resume (v0.4.13), so restarts do not reset the count.
+        try:
+            daily_trades = max(int(daily_trades or 0), int(getattr(self, "_trades_executed", 0) or 0))
+        except (TypeError, ValueError):
+            pass
         consecutive_losses = daily_status.consecutive_losses if daily_status else 0
 
         margin_avail = resolve_total_capital(engine=self)
@@ -2614,6 +2660,44 @@ class UltraBotEngine:
             except Exception:
                 pass
         return {}
+
+    async def _persist_risk_event(
+        self,
+        event_type: str,
+        severity: str,
+        message: str,
+        symbol: Optional[str] = None,
+        strategy: Optional[str] = None,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+        action_taken: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """v0.4.18: persist a row into the risk_events table (never raises).
+
+        The table existed since v0.3 but NOTHING wrote to it — gate blocks,
+        daily-risk halts and sizing rejects lived only in memory/logs, so
+        post-mortems (e.g. the Sep-9 G4 overshoot) had no DB trail. One small
+        INSERT per event; risk events are low-frequency by construction.
+        """
+        try:
+            async with self._repo_context() as repo:
+                if repo is None or not hasattr(repo, "create_risk_event"):
+                    return
+                await repo.create_risk_event(
+                    event_type=str(event_type or "RISK_EVENT")[:120],
+                    severity=str(severity or "info"),
+                    symbol=symbol,
+                    strategy=strategy,
+                    message=str(message or "")[:500],
+                    value=float(value) if value is not None else None,
+                    threshold=float(threshold) if threshold is not None else None,
+                    action_taken=action_taken,
+                    extra=extra or {},
+                    session_id=self.session_id,
+                )
+        except Exception as exc:
+            logger.debug("risk_events persist skipped (%s)", exc)
 
     def _time_stop_for(self, strategy: str) -> float:
         """Configured time-stop (minutes) for a strategy (0 disables)."""
@@ -4445,15 +4529,26 @@ class UltraBotEngine:
                 logger.debug("Daily risk partial P&L recording note: %s", dr_err)
 
         # Update position quantity and persist extra
-        extra_data = getattr(position, "extra", {}) or {}
-        if isinstance(extra_data, dict):
-            extra_data["partial_realized_pnl"] = extra_data.get("partial_realized_pnl", 0.0) + net_partial_pnl
-            extra_data["partial_fees"] = extra_data.get("partial_fees", 0.0) + partial_fees
+        # v0.4.18 P0 FIX (partial-booking P&L leak): position.extra may be a
+        # JSON **string** (ORM-backed positions) — the old
+        # `getattr(...) or {}` + isinstance(dict) check silently skipped BOTH
+        # accumulators in that case, so partial_realized_pnl / partial_fees
+        # never reached the DB and the close-time merge (HF-9) merged zeros
+        # (live Sep-9: HDFCLIFE leaked +48-59 net, ADANIENT +41-74).
+        # _position_extra_dict() parses both shapes; update_position() re-encodes.
+        extra_data = self._position_extra_dict(position)
+        extra_data["partial_realized_pnl"] = round(
+            float(extra_data.get("partial_realized_pnl", 0.0) or 0.0) + net_partial_pnl, 2
+        )
+        extra_data["partial_fees"] = round(
+            float(extra_data.get("partial_fees", 0.0) or 0.0) + partial_fees, 2
+        )
 
         async with self._repo_context() as repo:
             await repo.update_position(
                 position.id,
                 quantity=remaining_qty,
+                remaining_qty=remaining_qty,
                 current_price=current_price,
                 extra=extra_data,
             )
@@ -5233,6 +5328,16 @@ class UltraBotEngine:
             "mode": self.mode,
             "broker": self.broker_name or "paper",
             "session_id": self.session_id,
+            # v0.4.18 loop-liveness: loop_stalled_seconds > 0 while
+            # state=running means the main loop has not completed an
+            # iteration recently — the UI/watchdog must treat that as
+            # NOT healthy even though the process answers HTTP.
+            "loop_last_beat": self._loop_last_beat.isoformat() if self._loop_last_beat else None,
+            "loop_stalled_seconds": (
+                round((datetime.now(IST) - self._loop_last_beat).total_seconds(), 1)
+                if self._loop_last_beat and self.state in (EngineState.RUNNING, EngineState.PAUSED, EngineState.SCANNING)
+                else None
+            ),
             "regime": self.current_regime,
             "vix": self.vix,
             "vix_updated_at": self.vix_updated_at.isoformat() if self.vix_updated_at else None,

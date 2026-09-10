@@ -27,7 +27,9 @@ capital:
   max_per_position_pct: 25.0
   carry_forward_capital: true
 risk:
-  max_open_positions: 6
+  # v0.4.18 (user request): position capacity raised 6 -> 10. G1 reads this
+  # live from config; no gate code change needed.
+  max_open_positions: 10
   max_per_sector: 2
   max_sector_concentration_pct: 40.0
   max_daily_trades: 10
@@ -178,8 +180,11 @@ fees:
   stamp_duty_pct: 3.0e-05
 notifications:
   telegram_enabled: true
-  telegram_bot_token: 8959315649:AAEBZufqy1RpOGqkyz3L-NCJssGeL80R95U
-  telegram_chat_id: '5284252833'
+  # v0.4.18 SECURITY: real credentials were committed to this PUBLIC repo in
+  # aca19e0 — secrets belong in gitignored defaults.local.yaml only. Values
+  # scrubbed here; rotate the bot token via BotFather since it is in history.
+  telegram_bot_token: ''
+  telegram_chat_id: ''
   telegram_interactive_enabled: true
   telegram_canary_enabled: true
   telegram_poll_timeout: 25
