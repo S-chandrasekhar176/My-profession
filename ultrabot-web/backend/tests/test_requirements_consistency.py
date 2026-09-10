@@ -9,8 +9,12 @@ machine, CI, or clone hit the wall before a single line of code ran.
 The contract guarded here:
   1. requirements.txt NEVER lists fyers-apiv3 — the SDK is installed
      separately with --no-deps (requirements-fyers.txt; setup.sh step 3).
-  2. The aiohttp pin in requirements.txt stays exactly at the version the
-     pinned fyers SDK requires, so both files resolve as one consistent set.
+  2. The aiohttp pin in requirements.txt stays EXACT (==) at the version
+     the backend suite is verified against. v0.4.18 note: aca19e0
+     deliberately raised it to 3.10.11, DIVERGING from the SDK's own
+     aiohttp==3.9.3 pin — this is safe precisely because of contract #1
+     (the SDK is never co-resolved; it is installed --no-deps and the
+     suite runs green on 3.10.11 with the SDK present).
   3. requirements-fyers.txt keeps pinning fyers-apiv3 and documenting the
      --no-deps install; requirements-fyers-extra.txt keeps the SDK's
      undeclared runtime deps; setup.sh keeps performing the two-step install.
@@ -30,13 +34,17 @@ REQUIREMENTS_FYERS_EXTRA = BACKEND_DIR / "requirements-fyers-extra.txt"
 SETUP_SH = BACKEND_DIR.parent.parent / "setup.sh"
 
 # fyers-apiv3 version -> the exact aiohttp version its package metadata pins.
-# Verified against the installed SDK (3.1.16 -> aiohttp 3.9.3, the combination
-# the full backend suite runs green on). When the SDK pin in
-# requirements-fyers.txt is ever bumped, add the new version's required
-# aiohttp here after checking its metadata.
+# Documentation map (kept accurate for SDK bumps); since the SDK is always
+# installed --no-deps this no longer constrains the requirements.txt pin.
 FYERS_AIOHTTP_PIN = {
     "3.1.16": "3.9.3",
 }
+
+# The aiohttp version the backend suite is verified green against.
+# aca19e0 raised the shipped pin 3.9.3 -> 3.10.11 (full suite green incl.
+# the Fyers SDK running alongside via --no-deps); v0.4.18 encodes it here
+# so future bumps must be conscious (update this constant together).
+VERIFIED_AIOHTTP = "3.10.11"
 
 
 def _requirement_lines(path: Path):
@@ -66,7 +74,17 @@ def test_core_requirements_do_not_list_fyers():
     )
 
 
-def test_aiohttp_pin_matches_fyers_sdk_requirement():
+def test_aiohttp_pin_is_exact_and_matches_verified_version():
+    """v0.4.18: re-scoped after aca19e0 deliberately raised the aiohttp pin
+    to 3.10.11 (diverging from fyers-apiv3's own aiohttp==3.9.3 pin). The
+    divergence is safe because contract #1 keeps the SDK out of the main
+    requirements set (installed --no-deps by setup.sh), so pip never
+    co-resolves the two files. What must still hold:
+      * aiohttp stays EXACT-pinned (==) and declared,
+      * the pin equals the version the suite is verified against
+        (VERIFIED_AIOHTTP) so an unreviewed bump cannot slip through,
+      * the SDK pin in requirements-fyers.txt remains one we know the
+        aiohttp requirement for (FYERS_AIOHTTP_PIN documentation map)."""
     aio = _find_requirement(REQUIREMENTS, "aiohttp")
     assert aio is not None, (
         "aiohttp vanished from requirements.txt — news/news_engine.py imports "
@@ -74,27 +92,26 @@ def test_aiohttp_pin_matches_fyers_sdk_requirement():
     )
     m = re.search(r"==\s*([0-9][0-9a-zA-Z.]*)", aio)
     assert m, (
-        f"aiohttp must be EXACT-pinned (==) to the version the fyers SDK "
-        f"requires so both files always resolve as one set; got: {aio!r}"
+        f"aiohttp must be EXACT-pinned (==) to the version the backend suite "
+        f"is verified against; got: {aio!r}"
     )
     aio_version = m.group(1)
+    assert aio_version == VERIFIED_AIOHTTP, (
+        f"requirements.txt pins aiohttp=={aio_version} but the verified pin "
+        f"is {VERIFIED_AIOHTTP!r} — if this bump is intentional, update "
+        "VERIFIED_AIOHTTP in tests/test_requirements_consistency.py together "
+        "with the pin (and re-run the full suite)."
+    )
 
     fyers_line = _find_requirement(REQUIREMENTS_FYERS, "fyers-apiv3")
     assert fyers_line, "requirements-fyers.txt no longer pins fyers-apiv3"
     fm = re.search(r"fyers[-_]apiv3==([0-9][0-9a-zA-Z.]*)", fyers_line, re.IGNORECASE)
     assert fm, f"cannot parse fyers-apiv3 pin: {fyers_line!r}"
     fyers_version = fm.group(1)
-
-    expected = FYERS_AIOHTTP_PIN.get(fyers_version)
-    assert expected is not None, (
+    assert fyers_version in FYERS_AIOHTTP_PIN, (
         f"Unknown fyers-apiv3 pin {fyers_version!r}: after bumping the SDK, "
         "check which aiohttp the new version requires and add it to "
         "FYERS_AIOHTTP_PIN in this file"
-    )
-    assert aio_version == expected, (
-        f"requirements.txt pins aiohttp=={aio_version} but fyers-apiv3=="
-        f"{fyers_version} requires aiohttp=={expected} — fresh installs "
-        "would become ResolutionImpossible again"
     )
 
 

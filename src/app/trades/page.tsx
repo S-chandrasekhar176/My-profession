@@ -658,7 +658,11 @@ function HistoryTab({
         fees: t.fees || 0,
         netPnl: t.net_pnl || 0,
         duration: t.holding_duration || 'Intraday',
-        exitReason: t.exit_reason || 'MANUAL',
+        // v0.4.18 (Issue 3 close-out): never fabricate 'MANUAL'. Open rows
+        // (no exit yet) have exit_reason=NULL and used to render as MANUAL,
+        // which read as if a human had closed them (the Sep-9 HDFCLIFE
+        // screenshot confusion — engine TIME_EXIT was reported as MANUAL).
+        exitReason: t.exit_reason || (t.exit_time || t.exit_price ? 'UNKNOWN' : 'OPEN'),
       }))
       : [];
 

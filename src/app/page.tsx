@@ -904,8 +904,12 @@ export default function DashboardPage() {
               />
               <div className="flex flex-col">
                 <span className="text-xs text-ub-text-muted">
+                  {/* v0.4.18: honest scope label — pnlSummary is the engine's
+                      DAILY risk snapshot, so this win rate is today's only.
+                      The old "(All-Time)" label made Sep-9's 6/13 read like a
+                      lifetime stat and contradicted the Trades tab (7/15). */}
                   {data.hasTradeHistory
-                    ? `${data.winningTradesCount}/${data.totalTradesCount} Won (All-Time)`
+                    ? `${data.winningTradesCount}/${data.totalTradesCount} Won (Today)`
                     : 'Trades Won'}
                 </span>
                 <span

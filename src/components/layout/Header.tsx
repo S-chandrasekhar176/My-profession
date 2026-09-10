@@ -218,6 +218,14 @@ export default function Header() {
   const safeEngineStatus = engineStatus || 'stopped';
   const isEngineRunning = safeEngineStatus === 'running';
 
+  // v0.4.18 loop-liveness: the backend now reports how long since the main
+  // loop last completed an iteration. A "running" engine with a stalled loop
+  // (the invisible Sep-9 failure) renders AMBER here instead of the happy
+  // green pulse, with the stall age in the tooltip.
+  const rawStalled = Number((engineData as any)?.loop_stalled_seconds ?? 0);
+  const loopStalledSeconds = Number.isFinite(rawStalled) && rawStalled > 0 ? rawStalled : 0;
+  const isLoopStalled = isEngineRunning && loopStalledSeconds > 180;
+
   // v0.4.16: no fabricated VIX — show "—" until a real value arrives.
   const rawVix = vix > 0 ? vix : (marketData?.vix && marketData.vix > 0 ? marketData.vix : 0);
   const displayVix = typeof rawVix === 'number' && !isNaN(rawVix) && rawVix > 0 ? rawVix : 0;
@@ -317,14 +325,24 @@ export default function Header() {
 
           {/* Engine Status: Clean Glowing Pulse Dot only */}
           <div
-            title={isEngineRunning ? 'Engine: Running' : 'Engine: Stopped'}
+            title={
+              isLoopStalled
+                ? `Engine: Running — LOOP STALLED ${Math.round(loopStalledSeconds)}s (no scan iterations)`
+                : isEngineRunning
+                  ? 'Engine: Running'
+                  : 'Engine: Stopped'
+            }
             className={`flex items-center justify-center h-7 w-7 rounded-full border transition-all duration-300 ${
-              isEngineRunning
-                ? 'bg-emerald-500/15 border-emerald-500/40 shadow-[0_0_10px_rgba(16,185,129,0.25)]'
-                : 'bg-rose-500/15 border-rose-500/40 shadow-[0_0_8px_rgba(244,63,94,0.2)]'
+              isLoopStalled
+                ? 'bg-amber-500/15 border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                : isEngineRunning
+                  ? 'bg-emerald-500/15 border-emerald-500/40 shadow-[0_0_10px_rgba(16,185,129,0.25)]'
+                  : 'bg-rose-500/15 border-rose-500/40 shadow-[0_0_8px_rgba(244,63,94,0.2)]'
             }`}
           >
-            {isEngineRunning ? (
+            {isLoopStalled ? (
+              <span className="inline-block h-2.5 w-2.5 rounded-full bg-amber-500 shadow-[0_0_8px_#f59e0b] animate-pulse" />
+            ) : isEngineRunning ? (
               <span className="relative flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-80"></span>
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500 shadow-[0_0_10px_#10b981]"></span>

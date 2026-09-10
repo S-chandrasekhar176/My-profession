@@ -35,6 +35,80 @@ _quotes_cache_timestamp: float = 0.0
 # limiters in brokers.fyers still apply to every call.
 _fyers_feed_cache: Dict[str, Any] = {"feed": None, "tried": False}
 
+# v0.4.18 (Issues 10+11): shared lazily-built FyersBroker for REALTIME quotes
+# (the broker's live quotes endpoint — the same tape the Fyers terminal
+# shows). Kept separate from _fyers_feed_cache so chart candles and quotes
+# fail independently; rebuilt when the stored token changes (daily re-login
+# in Settings is picked up WITHOUT a backend restart).
+_fyers_quotes_cache: Dict[str, Any] = {"broker": None, "tried": False, "token_sig": None}
+
+# v0.4.18: micro-cache for bulk realtime quotes. The header banner polls
+# every 3s from every open browser tab; without this each poll would hit the
+# broker. 2.5s TTL keeps consecutive polls on one upstream call while staying
+# well inside tick-freshness expectations.
+_rt_quotes_cache: Dict[str, Any] = {"data": {}, "ts": 0.0}
+_RT_QUOTES_TTL_SECONDS = 2.5
+
+
+async def _get_fyers_quotes_broker() -> Optional[Any]:
+    """Return a shared FyersBroker (valid stored token) for realtime quotes.
+
+    Mirrors _get_fyers_chart_feed(): caches process-wide, retries a failed
+    build at most once until the token signature changes (so a fresh daily
+    re-login re-arms it), and never raises.
+    """
+    from db.database import async_session_factory
+    from db.repository import Repository
+    from utils.encryption import decrypt_credentials
+
+    token_sig = None
+    creds = {}
+    try:
+        session = async_session_factory()
+        repo = Repository(session)
+        try:
+            cred = await repo.get_broker_credentials("fyers")
+        finally:
+            if hasattr(repo, "close"):
+                try:
+                    res = repo.close()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+        if cred is None or not getattr(cred, "encrypted_credentials", None):
+            return None
+        creds = decrypt_credentials(cred.encrypted_credentials) or {}
+        token_sig = str(creds.get("access_token") or "")
+        if not token_sig:
+            return None
+    except Exception:
+        return None
+
+    cached = _fyers_quotes_cache["broker"]
+    if cached is not None and _fyers_quotes_cache["token_sig"] == token_sig:
+        return cached
+    if _fyers_quotes_cache["tried"] and _fyers_quotes_cache["token_sig"] == token_sig:
+        return None
+
+    try:
+        from brokers.fyers import FyersBroker
+
+        app_id = str(creds.get("app_id") or creds.get("client_id") or "")
+        if not app_id:
+            return None
+        broker = FyersBroker(app_id=app_id, access_token=token_sig)
+        _fyers_quotes_cache["broker"] = broker
+        _fyers_quotes_cache["token_sig"] = token_sig
+        _fyers_quotes_cache["tried"] = True
+        logger.info("Realtime quotes: shared FyersBroker ready (token valid)")
+        return broker
+    except Exception as exc:
+        logger.warning("Realtime quotes: FyersBroker build failed (%s) — engine/Yahoo fallbacks", exc)
+        _fyers_quotes_cache["tried"] = True
+        _fyers_quotes_cache["token_sig"] = token_sig
+        return None
+
 
 async def _get_fyers_chart_feed() -> Optional[Any]:
     """Return a shared FyersCandleFeed when a valid Fyers token exists, else None.
@@ -191,7 +265,7 @@ async def get_live_quotes(
     """Return real-time LTP, change, and change percentage for requested symbols directly from connected broker feeds or live market data."""
     import time
     import asyncio
-    global _quotes_cache, _quotes_cache_timestamp
+    global _quotes_cache, _quotes_cache_timestamp, _rt_quotes_cache
 
     if not symbols:
         return {"success": True, "data": {}}
@@ -201,10 +275,49 @@ async def get_live_quotes(
     results: Dict[str, Any] = {}
 
     missing_symbols = []
-    
+
+    # ── Step 0 (v0.4.18, Issues 10+11): REALTIME broker quotes first ──
+    # The previous chain answered the header banner from the engine's
+    # scan-cadence attributes (60-180s stale) and, for every index the
+    # engine does not track (SENSEX/MIDCPNIFTY/FINNIFTY), from Yahoo
+    # 15-MINUTE bars — so the banner "ticks" were minutes old and users
+    # saw simulated-feeling movement. Now the broker's live quotes
+    # endpoint (price+change+changePct+prev_close in one bulk call,
+    # micro-cached 2.5s) is the primary source whenever Fyers
+    # credentials are stored.
+    rt_broker = await _get_fyers_quotes_broker()
+    if rt_broker is not None and sym_list:
+        rt_data: Dict[str, Dict[str, Any]] = {}
+        cache_fresh = (now - _rt_quotes_cache["ts"]) < _RT_QUOTES_TTL_SECONDS
+        if cache_fresh and _rt_quotes_cache["data"]:
+            rt_data = _rt_quotes_cache["data"]
+        else:
+            try:
+                rt_data = await asyncio.wait_for(
+                    rt_broker.get_quotes(sym_list), timeout=4.0
+                )
+                if rt_data:
+                    _rt_quotes_cache["data"] = rt_data
+                    _rt_quotes_cache["ts"] = now
+            except Exception as rt_exc:
+                logger.debug("Realtime quotes fetch failed (%s) — fallbacks", rt_exc)
+                rt_data = {}
+        for sym in sym_list:
+            q = rt_data.get(sym)
+            if q and q.get("price", 0) > 0:
+                results[sym] = {
+                    "price": q["price"],
+                    "change": q.get("change", 0.0),
+                    "changePct": q.get("changePct", 0.0),
+                    "previousClose": q.get("previousClose"),
+                    "source": "Fyers (Realtime)",
+                }
+
     # 1. Check if engine has live quotes for indices or watchlist stocks
     active_broker = getattr(engine, "broker_name", "") or "paper"
     for sym in sym_list:
+        if sym in results:
+            continue
         clean = sym.replace(".NS", "").replace("^", "")
         # Check special engine indices
         # v0.4.16 (user-testing feedback 2026-09-08): engine.nifty_change is a

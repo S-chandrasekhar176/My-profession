@@ -511,6 +511,90 @@ class MarketLifecycleScheduler:
         except Exception as exc:
             logger.error("Auto squareoff routine error: %s", exc, exc_info=True)
 
+    async def _write_daily_summary(self, today_str: str) -> Dict[str, Any]:
+        """v0.4.18: shared DailySummary writer (used by the 15:30 cron AND by
+        the boot-time EOD catch-up). Computes the day's ledger stats, persists
+        one daily_summary row and returns the stats for broadcast/alerts.
+        Never raises (callers wrap it)."""
+        total_trades = 0
+        total_net_pnl = 0.0
+        stats: Dict[str, Any] = {
+            "date": today_str,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
+            "total_fees": 0.0,
+            "best_trade": 0.0,
+            "worst_trade": 0.0,
+            "trades": [],
+        }
+
+        repo = await self._get_repo()
+        try:
+            todays_trades = await repo.get_todays_closed_trades()
+            wins = sum(1 for t in todays_trades if t.net_pnl > 0)
+            losses = sum(1 for t in todays_trades if t.net_pnl <= 0)
+            total_trades = len(todays_trades)
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+            total_net_pnl = sum(t.net_pnl for t in todays_trades)
+
+            # v0.4.8 HF-9: surface gross P&L, fees and best/worst in the
+            # EOD alert — the previous payload carried ONLY net_pnl, so
+            # Telegram showed "Total Fees: Rs 0.00" every single day.
+            total_gross_pnl = round(sum(float(t.pnl or 0.0) for t in todays_trades), 2)
+            total_fees_paid = round(sum(float(t.fees or 0.0) for t in todays_trades), 2)
+            best_trade_pnl = round(max((float(t.net_pnl or 0.0) for t in todays_trades), default=0.0), 2)
+            worst_trade_pnl = round(min((float(t.net_pnl or 0.0) for t in todays_trades), default=0.0), 2)
+
+            # Resolve configured starting capital from engine or config
+            cap_cfg = self.engine.config.get_capital_config() if (self.engine and hasattr(self.engine, "config") and hasattr(self.engine.config, "get_capital_config")) else {}
+            starting_capital = float(
+                (self.engine.initial_capital if self.engine and hasattr(self.engine, "initial_capital") and self.engine.initial_capital is not None else None)
+                or cap_cfg.get("virtual_capital")
+                or 500000.0
+            )
+            ending_capital = round(starting_capital + total_net_pnl, 2)
+
+            # Persist summary
+            await repo.create_daily_summary(
+                date=today_str,
+                total_trades=total_trades,
+                wins=wins,
+                losses=losses,
+                win_rate=win_rate,
+                net_pnl=total_net_pnl,
+                starting_capital=starting_capital,
+                ending_capital=ending_capital,
+                max_drawdown_pct=await repo.get_max_drawdown_pct(),
+                regime=getattr(self.engine, "current_regime", None),
+                vix_close=getattr(self.engine, "vix", None),
+            )
+
+            stats.update({
+                "total_trades": total_trades,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": win_rate,
+                "net_pnl": total_net_pnl,
+                "gross_pnl": total_gross_pnl,
+                "total_fees": total_fees_paid,
+                "best_trade": best_trade_pnl,
+                "worst_trade": worst_trade_pnl,
+                "trades": todays_trades,
+            })
+        finally:
+            if repo is not None and hasattr(repo, "close"):
+                try:
+                    res = repo.close()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+        return stats
+
     async def on_market_close(self) -> None:
         """15:30 PM: Market Close & Save Daily Summary to DB."""
         if not self._is_trading_day():
@@ -518,57 +602,10 @@ class MarketLifecycleScheduler:
         logger.info("[15:30 PM IST] Market Close - Generating Daily Summary...")
         try:
             today_str = datetime.now(IST).date().isoformat()
-            total_trades = 0
-            total_net_pnl = 0.0
+            stats = await self._write_daily_summary(today_str)
+            total_trades = stats["total_trades"]
+            total_net_pnl = stats["net_pnl"]
 
-            repo = await self._get_repo()
-            try:
-                todays_trades = await repo.get_todays_closed_trades()
-                wins = sum(1 for t in todays_trades if t.net_pnl > 0)
-                losses = sum(1 for t in todays_trades if t.net_pnl <= 0)
-                total_trades = len(todays_trades)
-                win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-                total_net_pnl = sum(t.net_pnl for t in todays_trades)
-
-                # v0.4.8 HF-9: surface gross P&L, fees and best/worst in the
-                # EOD alert — the previous payload carried ONLY net_pnl, so
-                # Telegram showed "Total Fees: Rs 0.00" every single day.
-                total_gross_pnl = round(sum(float(t.pnl or 0.0) for t in todays_trades), 2)
-                total_fees_paid = round(sum(float(t.fees or 0.0) for t in todays_trades), 2)
-                best_trade_pnl = round(max((float(t.net_pnl or 0.0) for t in todays_trades), default=0.0), 2)
-                worst_trade_pnl = round(min((float(t.net_pnl or 0.0) for t in todays_trades), default=0.0), 2)
-
-                # Resolve configured starting capital from engine or config
-                cap_cfg = self.engine.config.get_capital_config() if (self.engine and hasattr(self.engine, "config") and hasattr(self.engine.config, "get_capital_config")) else {}
-                starting_capital = float(
-                    (self.engine.initial_capital if self.engine and hasattr(self.engine, "initial_capital") and self.engine.initial_capital is not None else None)
-                    or cap_cfg.get("virtual_capital")
-                    or 500000.0
-                )
-                ending_capital = round(starting_capital + total_net_pnl, 2)
-
-                # Persist summary
-                await repo.create_daily_summary(
-                    date=today_str,
-                    total_trades=total_trades,
-                    wins=wins,
-                    losses=losses,
-                    win_rate=win_rate,
-                    net_pnl=total_net_pnl,
-                    starting_capital=starting_capital,
-                    ending_capital=ending_capital,
-                    max_drawdown_pct=await repo.get_max_drawdown_pct(),
-                    regime=getattr(self.engine, "current_regime", None),
-                    vix_close=getattr(self.engine, "vix", None),
-                )
-            finally:
-                if repo is not None and hasattr(repo, "close"):
-                    try:
-                        res = repo.close()
-                        if asyncio.iscoroutine(res):
-                            await res
-                    except Exception:
-                        pass
             logger.info("DailySummary saved for %s: %d trades, Net PnL: INR %.2f", today_str, total_trades, total_net_pnl)
 
             await self.engine._broadcast("market", {
@@ -576,7 +613,7 @@ class MarketLifecycleScheduler:
                 "date": today_str,
                 "total_trades": total_trades,
                 "net_pnl": total_net_pnl,
-                "win_rate": win_rate,
+                "win_rate": stats["win_rate"],
                 "timestamp": datetime.now(IST).isoformat(),
             })
 
@@ -585,19 +622,64 @@ class MarketLifecycleScheduler:
                     "daily_summary": {
                         "date": today_str,
                         "total_trades": total_trades,
-                        "wins": wins,
-                        "losses": losses,
-                        "win_rate": win_rate,
+                        "wins": stats["wins"],
+                        "losses": stats["losses"],
+                        "win_rate": stats["win_rate"],
                         "net_pnl": total_net_pnl,
-                        "gross_pnl": total_gross_pnl,
-                        "total_fees": total_fees_paid,
-                        "best_trade": best_trade_pnl,
-                        "worst_trade": worst_trade_pnl,
+                        "gross_pnl": stats["gross_pnl"],
+                        "total_fees": stats["total_fees"],
+                        "best_trade": stats["best_trade"],
+                        "worst_trade": stats["worst_trade"],
                     },
-                    "trades": todays_trades,
+                    "trades": stats["trades"],
                 })
         except Exception as exc:
             logger.error("Market close routine error: %s", exc, exc_info=True)
+
+    async def run_eod_summary_catchup(self) -> bool:
+        """v0.4.18: boot-time catch-up for the 15:30 DailySummary write.
+
+        APScheduler crons never backfill: when the backend silently dies
+        before 15:30 (the Sep-8/9 pattern — workspace suspension / container
+        recycle), daily_summary stayed EMPTY (0 rows in the live DB) even
+        though the trades ledger was complete, and the EOD PDF had nothing
+        to render. On boot after 15:30 IST on a trading day with no
+        daily_summary row for today, write it from the ledger.
+
+        Returns True if a summary was written.
+        """
+        try:
+            now = datetime.now(IST)
+            if not self._is_trading_day():
+                return False
+            if now.time() < time(15, 30):
+                return False
+            today_str = now.date().isoformat()
+
+            repo = await self._get_repo()
+            try:
+                existing = await repo.get_daily_summary(today_str)
+            finally:
+                if repo is not None and hasattr(repo, "close"):
+                    try:
+                        res = repo.close()
+                        if asyncio.iscoroutine(res):
+                            await res
+                    except Exception:
+                        pass
+            if existing is not None:
+                logger.info("[EOD catch-up] daily_summary for %s already exists — nothing to do", today_str)
+                return False
+
+            stats = await self._write_daily_summary(today_str)
+            logger.info(
+                "[EOD catch-up] DailySummary BACKFILLED for %s: %d trades, Net PnL: INR %.2f",
+                today_str, stats["total_trades"], stats["net_pnl"],
+            )
+            return True
+        except Exception as exc:
+            logger.warning("EOD summary catch-up failed: %s", exc)
+            return False
 
     async def on_eod_pdf(self) -> None:
         """15:35 IST: render the EOD PDF, archive it, push to Telegram (v0.4.8 P2)."""
