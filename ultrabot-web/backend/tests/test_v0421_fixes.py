@@ -19,6 +19,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -283,3 +284,161 @@ def test_health_contract_never_beat_flag_logic():
     stalled = compute_loop_stalled_seconds(beat, state_val)
     never = bool(beat is None and state_val in ("running", "paused", "scanning"))
     assert stalled >= 0 and never is False
+
+
+# ────────────────────────────────────────────────
+# 6. Repository.close() — idempotent + cancellation-safe (GC-leak fix)
+# ────────────────────────────────────────────────
+
+class _FakeSession:
+    def __init__(self):
+        self.closed = False
+        self.close_started = asyncio.Event()
+
+    async def close(self):
+        self.close_started.set()
+        await asyncio.sleep(0.05)
+        self.closed = True
+
+    async def rollback(self):
+        return None
+
+
+def test_repo_close_survives_cancellation_and_is_idempotent():
+    """Cancel DURING close: the shielded inner close must still complete —
+    this was the exact GC 'non-checked-in connection' leak window."""
+    from db.repository import Repository
+
+    async def _inner():
+        s = _FakeSession()
+        repo = Repository(s)
+        task = asyncio.create_task(repo.close())
+        await s.close_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert repo.session is None  # ref dropped BEFORE await (idempotent)
+        await asyncio.sleep(0.08)    # shielded inner close completes in bg
+        assert s.closed is True      # connection actually returned → no GC drop
+        await repo.close()           # second close: no-op, must not raise
+
+    asyncio.run(_inner())
+
+
+def test_repo_close_swallows_session_errors():
+    from db.repository import Repository
+
+    class _Boom:
+        async def close(self):
+            raise RuntimeError("db gone")
+
+    async def _inner():
+        repo = Repository(_Boom())
+        await repo.close()  # must not raise
+        assert repo.session is None
+
+    asyncio.run(_inner())
+
+
+# ────────────────────────────────────────────────
+# 7. Telegram interactive bot — heartbeat + supervision + bounded handlers
+# ────────────────────────────────────────────────
+
+def _mk_bot():
+    from notifications.telegram_interactive import InteractiveTelegramBot
+
+    return InteractiveTelegramBot(
+        telegram_bot=MagicMock(),
+        notif_config={
+            "telegram_interactive_enabled": True,
+            "telegram_bot_token": "test-token",
+            "telegram_chat_id": "42",
+        },
+    )
+
+
+def test_telegram_poll_stalled_semantics():
+    import time as _time
+
+    bot = _mk_bot()
+    assert bot.poll_stalled_seconds() is None  # never started / no beat
+    bot._tasks = [MagicMock()]
+    bot._poll_beat = _time.monotonic() - 7.0
+    val = bot.poll_stalled_seconds()
+    assert 5.0 <= val <= 10.0
+    bot._stopping = True
+    assert bot.poll_stalled_seconds() is None  # stopping → not applicable
+
+
+def test_telegram_loop_supervision_respawns_then_caps():
+    from notifications.telegram_interactive import (
+        InteractiveTelegramBot,
+        _TG_LOOP_RESPAWN_CAP,
+    )
+
+    bot = _mk_bot()
+
+    async def _inner():
+        async def dying():
+            raise RuntimeError("boom")
+
+        bot._stopping = False
+        bot._supervised_create("tg-test", dying)
+        await asyncio.sleep(0.06)
+        assert bot._respawn_counts.get("tg-test", 0) >= 1
+        assert "boom" in bot._loop_deaths.get("tg-test", "")
+
+        # at cap: a death must NOT respawn again
+        bot._respawn_counts["tg-test"] = _TG_LOOP_RESPAWN_CAP
+        bot._supervised_create("tg-test", dying)
+        await asyncio.sleep(0.06)
+        assert bot._respawn_counts["tg-test"] == _TG_LOOP_RESPAWN_CAP
+
+        bot._stopping = True
+        for t in list(bot._tasks):
+            t.cancel()
+        await asyncio.gather(*bot._tasks, return_exceptions=True)
+
+    asyncio.run(_inner())
+
+
+def test_poll_loop_hung_handler_does_not_block_next_message(monkeypatch):
+    """The 11:16-IST freeze: a hung /command used to wedge ALL polling.
+    Bounded dispatch must cancel the hung handler and keep serving."""
+    import notifications.telegram_interactive as tg_mod
+
+    monkeypatch.setattr(tg_mod, "_HANDLER_TIMEOUT_S", 0.05)
+    bot = _mk_bot()
+
+    async def _inner():
+        handled = []
+
+        async def handler(text):
+            if text == "/slow":
+                await asyncio.sleep(5.0)
+            handled.append(text)
+
+        bot._handle_command = handler
+        bot._authorized = lambda cid: True
+        seq = [
+            {"ok": True, "result": [
+                {"update_id": 1, "message": {"chat": {"id": 1}, "text": "/slow"}}]},
+            {"ok": True, "result": [
+                {"update_id": 2, "message": {"chat": {"id": 1}, "text": "/fast"}}]},
+        ]
+
+        async def fake_tg(method, **kwargs):
+            return seq.pop(0) if seq else None
+
+        bot._tg = fake_tg
+        task = asyncio.create_task(bot.poll_loop())
+        deadline = asyncio.get_event_loop().time() + 3.0
+        while "/fast" not in handled and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert "/fast" in handled            # served despite /slow hanging
+        assert "/slow" not in handled        # hung handler cancelled, not completed
+
+    asyncio.run(_inner())

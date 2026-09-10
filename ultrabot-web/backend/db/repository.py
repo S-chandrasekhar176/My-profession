@@ -4,6 +4,7 @@ Provides CRUD operations for every table plus domain-specific queries.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, date, timedelta
@@ -62,10 +63,29 @@ class Repository:
         self.session = session
 
     async def close(self) -> None:
-        """Close the underlying session and release the database connection."""
+        """Close the underlying session and release the database connection.
+
+        v0.4.21 hardening (GC "non-checked-in connection" warnings):
+          * IDEMPOTENT — the session reference is dropped BEFORE the await,
+            so double-close (two finally blocks racing a cancellation) can
+            never spawn two close coroutines for one connection.
+          * SHIELDED — ``asyncio.shield`` keeps the inner ``session.close()`
+            running even when THIS task is cancelled while closing (the
+            poll-loop handler timeout, ``stop()`` teardown, loop-shutdown
+            teardown). A cancelled ``finally: await repo.close()`` used to
+            interrupt the close itself, leaving the aiosqlite connection to
+            be dropped by the garbage collector — the exact SAWarning/
+            NullPool-ERROR pattern in the logs, with each dropped connection
+            leaking its dedicated aiosqlite daemon thread (Thread-4349...).
+        """
         if self.session is not None:
+            session, self.session = self.session, None
             try:
-                await self.session.close()
+                await asyncio.shield(session.close())
+            except asyncio.CancelledError:
+                # Outer cancellation: the shielded inner close keeps running
+                # in the background — propagate the cancellation contract.
+                raise
             except Exception:
                 pass
 
@@ -75,7 +95,11 @@ class Repository:
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if exc_type is not None and self.session is not None:
             try:
-                await self.session.rollback()
+                # shield: a cancellation during teardown must not abandon the
+                # rollback (see close() — same GC-drop leak class, v0.4.21)
+                await asyncio.shield(self.session.rollback())
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 pass
         await self.close()

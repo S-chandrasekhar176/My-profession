@@ -102,7 +102,7 @@ except Exception:  # pragma: no cover — host may run an older checkout
         return True, "stall sustained"
 
 
-STALL_STREAK_NEEDED = 2  # consecutive above-threshold health polls
+TG_POLL_STALE_BASE_S = 120.0  # v0.4.21: alert floor for telegram poll staleness
 
 POLL_INTERVAL = 15
 SNAPSHOT_INTERVAL = 900
@@ -162,20 +162,28 @@ STALL_RESTART_COUNTER = PERSIST / "watchdog_stall_restarts.json"
 _last_restart_ts = 0.0  # epoch of the most recent restart (any path)
 
 
-def loop_stalled_seconds() -> float | None:
-    """loop_stalled_seconds from the unauthenticated /api/health payload
-    (the engine/status endpoint requires API credentials the watchdog does
-    not hold), or None if unavailable."""
+def fetch_health() -> dict | None:
+    """Parsed /api/health payload (single fetch per watchdog poll)."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(BASE + "/api/health", timeout=5) as r:
             if r.status != 200:
                 return None
-            import json as _json
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
 
-            data = _json.loads(r.read().decode("utf-8", "replace"))
-            raw = data.get("loop_stalled_seconds")
-            return float(raw) if raw is not None else None
+
+def loop_stalled_seconds(health: dict | None = None) -> float | None:
+    """loop_stalled_seconds from the unauthenticated /api/health payload
+    (the engine/status endpoint requires API credentials the watchdog does
+    not hold), or None if unavailable."""
+    try:
+        data = health if health is not None else fetch_health()
+        if data is None:
+            return None
+        raw = data.get("loop_stalled_seconds")
+        return float(raw) if raw is not None else None
     except Exception:
         return None
 
@@ -467,11 +475,16 @@ def main() -> None:
     backoff_n = 0
     loop_stall_alerted = False
     stall_streak = 0  # v0.4.21: consecutive above-threshold stall readings
+    tg_poll_alerted = False  # v0.4.21: telegram-poll deaf alert (edge-triggered)
 
     while True:
         try:
             up, latency = health_ok()
             heartbeat("UP" if up else "DOWN", latency if up else -1)
+
+            # v0.4.21: one health fetch per poll, shared by the stall check
+            # and the telegram-poll liveness check.
+            health = fetch_health() if up else None
 
             if up:
                 if not was_up:
@@ -487,7 +500,7 @@ def main() -> None:
                 # should_stall_restart (threshold, daily cap, market-open
                 # gate, intentional-stop marker, shared restart guard).
                 try:
-                    stalled = loop_stalled_seconds()
+                    stalled = loop_stalled_seconds(health)
                     stalled_bad = (
                         stalled is not None
                         and (stalled >= LOOP_STALL_ALERT_SECONDS or stalled == NEVER_BEAT_SENTINEL)
@@ -550,6 +563,37 @@ def main() -> None:
                             loop_stall_alerted = False
                         else:
                             log(f"stall escalation withheld: {reason}")
+                except Exception:
+                    pass
+
+                # v0.4.21: telegram-poll liveness — the interactive bot can go
+                # deaf (dead/hung poll task) while the backend and engine are
+                # otherwise fine (the 11:16-IST report). /api/health exposes
+                # the poll heartbeat; alert when stale beyond the long-poll
+                # floor. Not a restart trigger: the backend respawns the loop
+                # in-process (cap 5/day); this is the escalation beacon.
+                try:
+                    if health is not None and "telegram_poll_stalled_seconds" in health:
+                        tg_stalled = health.get("telegram_poll_stalled_seconds")
+                        tg_timeout = float(health.get("telegram_poll_timeout") or 0)
+                        tg_limit = max(TG_POLL_STALE_BASE_S, tg_timeout + 60.0)
+                        tg_respawns = int(health.get("telegram_poll_respawns") or 0)
+                        if tg_stalled is not None and float(tg_stalled) > tg_limit:
+                            if not tg_poll_alerted:
+                                tg_poll_alerted = True
+                                log(
+                                    "TELEGRAM POLL stale %.0fs (> %.0fs floor, respawns=%d) — bot deaf on Telegram"
+                                    % (float(tg_stalled), tg_limit, tg_respawns)
+                                )
+                                telegram_alert(
+                                    "🟠 UltraBot: TELEGRAM POLL LOOP not responding for "
+                                    f"{float(tg_stalled):.0f}s (respawns today: {tg_respawns}) "
+                                    f"({datetime.now().strftime('%H:%M:%S')} IST). "
+                                    "Bot is deaf on Telegram — engine may still be trading. "
+                                    "Manual backend restart recommended if this persists."
+                                )
+                        elif tg_stalled is not None:
+                            tg_poll_alerted = False
                 except Exception:
                     pass
             else:

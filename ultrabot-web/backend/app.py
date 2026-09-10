@@ -432,6 +432,30 @@ async def health():
     except Exception:
         loop_stalled = None
 
+    # v0.4.21: interactive-telegram poll health — the poll task previously
+    # had no supervision NOR heartbeat, so a dead/hung poll loop (the
+    # 11:16-IST "bot stopped responding" event) was invisible from outside.
+    tg_poll_stalled = None
+    tg_poll_timeout = None
+    tg_poll_alive = False
+    tg_poll_respawns = 0
+    tg_poll_last_death = None
+    try:
+        itg = getattr(app.state, "telegram_interactive", None)
+        if itg is not None and not getattr(itg, "_stopping", True):
+            tg_poll_stalled = itg.poll_stalled_seconds()
+            tg_poll_timeout = float(getattr(itg, "_poll_timeout", 0) or 0)
+            # one long-poll cycle can block ~poll_timeout+12s legitimately —
+            # alive = beat within max(120s, poll_timeout+60s)
+            tg_poll_alive = (
+                tg_poll_stalled is not None
+                and tg_poll_stalled <= max(120.0, tg_poll_timeout + 60.0)
+            )
+            tg_poll_respawns = int(itg._respawn_counts.get("tg-interactive-poll", 0))
+            tg_poll_last_death = itg._loop_deaths.get("tg-interactive-poll")
+    except Exception:
+        tg_poll_stalled = None
+
     try:
         from db.database import async_session_factory
         from sqlalchemy import text
@@ -451,6 +475,11 @@ async def health():
         "feed": feed_status,
         "loop_stalled_seconds": loop_stalled,
         "loop_never_beat": loop_never_beat,
+        "telegram_poll_alive": tg_poll_alive,
+        "telegram_poll_stalled_seconds": tg_poll_stalled,
+        "telegram_poll_timeout": tg_poll_timeout,
+        "telegram_poll_respawns": tg_poll_respawns,
+        "telegram_poll_last_death": tg_poll_last_death,
     }
 
 

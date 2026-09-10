@@ -1,7 +1,34 @@
 # v0.4.21 — Phase A: Verify & Stabilize
 
 **Branch:** `wed_v0.4.21` (from merged main `877bfb7` = PR #17 / v0.4.20)
-**Theme:** close out the Sep-9 13:35 incident, make the loop-stall failure mode impossible to miss AND self-recovering, add PR quality gates (CI).
+**Theme:** close out the Sep-9 13:35 incident, make the loop-stall failure mode impossible to miss AND self-recovering, add PR quality gates (CI), plus the wave-2 fixes: DB connection-leak hardening + Telegram deaf-bot self-healing.
+
+---
+
+## 0. Wave 2 — connection leaks + Telegram silence (user report, Sep 10)
+
+**Reported:** repeated `SAWarning / NullPool ERROR: garbage collector is trying to clean up non-checked-in connection (Thread-4349/4350)` and **"Bot stopped responding to Telegram messages since 11:16am"**.
+
+### Root causes
+
+| # | Finding | Mechanism |
+|---|---------|-----------|
+| W1 | **Connection-GC leak window** | Every production session site closes properly on exception paths — BUT `Repository.close()` was a plain `await self.session.close()` inside consumers' `finally` blocks. When the enclosing task is cancelled **during** the close (handler timeouts, `stop()` teardown, loop wedges like 11:16), the close itself is interrupted → the aiosqlite connection is never returned → GC drops it later (the SAWarning), **leaking its dedicated daemon thread** (the `Thread-4350` counter). |
+| W2 | **Telegram poll loop — one hung handler freezes everything** | `poll_loop` awaited each `/command` handler **inline** with no timeout. A single hung handler (DB/HTTP wedge at 11:16) blocked the receive loop forever → bot deaf to ALL messages. |
+| W3 | **Telegram loop tasks — fire-and-forget, no supervision, no heartbeat** | `asyncio.create_task(poll_loop())` with no done-callback: a dead poll task = silently dead bot, invisible from `/api/health` and the watchdog. Same disease as the Sep-9 engine loop. |
+
+### Fixes
+
+| Fix | What |
+|-----|------|
+| **F6** `Repository.close()` hardened (db/repository.py) | **Idempotent** (session ref dropped before the await — double-close can never double-spawn) + **shielded** (`asyncio.shield(session.close())` — a cancellation during close lets the inner close finish in the background; the connection always returns to the pool). `__aexit__` rollback hardened the same way. Every leak site in the codebase funnels through this one choke point. |
+| **F7** Bounded command dispatch (telegram_interactive.py) | Every incoming update's handler now runs under `asyncio.wait_for(..., 30s)`. A hung handler is cancelled and logged; **the next message is still served**. |
+| **F8** Telegram loop supervision + in-process respawn | `start()` tasks get done-callbacks: death while active → critical log + reason recorded + **auto-respawn up to 5/day per loop**. |
+| **F9** Poll heartbeat on `/api/health` | New fields: `telegram_poll_alive`, `telegram_poll_stalled_seconds`, `telegram_poll_timeout`, `telegram_poll_respawns`, `telegram_poll_last_death`. |
+| **F10** Watchdog: telegram-deaf alert | Edge-triggered Telegram alert when the poll heartbeat goes stale beyond `max(120s, poll_timeout+60s)` — the user gets pinged on the SAME channel the bot went deaf on. |
+
+### Why the two symptoms are one incident
+11:16 IST: a wedge/hang froze the poll loop (W2) — bot went silent. Sessions caught open mid-call during the freeze were later GC-dropped (W1) — the SAWarnings in the logs. Wave-2 fixes break both chains: hangs can no longer freeze polling (F7), dead loops respawn (F8), closes always complete (F6), and any residual deafness alerts to Telegram + `loop_stalled`-style visibility (F9/F10).
 
 ---
 
@@ -50,14 +77,17 @@ Position rehydration (proven since v0.4.13) makes a restart strictly better than
 
 ## 3. Verification
 
-- New tests: `tests/test_v0421_fixes.py` — **25 tests** (sentinel semantics ×7, supervision callback ×5, restart policy ×9, market-hours boundaries ×3, health contract ×1).
-- Full backend suite: **1009 passed / 0 failed / 0 skipped** (35.1s) — up from 984.
+- New tests: `tests/test_v0421_fixes.py` — **30 tests** (sentinel semantics ×7, engine-loop supervision ×5, restart policy ×9, market-hours boundaries ×3, health contract ×1, Repository close ×2, telegram heartbeat/supervision/bounded-dispatch ×3).
+- Full backend suite: **1014 passed / 0 failed / 0 skipped** (34.9s).
 - `bunx tsc --noEmit`: clean.
 - v0.4.20 markers re-verified in merged main (invalidated-route DB merge, `close_qty` semantics, backtest honesty, WS expired marking).
 - Gold-mine DB touched **read-only** (URI `?mode=ro`); no writes, no migrations, no wipes.
+- Connection-site audit: all `async_session_factory()` call sites + every `repo_getter` consumer (SessionManager, engine `_repo_context`, error_engine ×4, scheduler ×7, telegram ×3, G13 gate, fyers_candles) verified close-disciplined; the leak was the cancellation window inside `close()` itself, now shielded centrally.
 
 ## 4. Operator notes
 
 1. Deploy at a flat window (never 09:00–15:35 IST) — restart + watchdog + backend all pick up the new modules together.
 2. On next mid-session wedge expect: Telegram **STALLED** alert at 5 min, **STALL-RESTART** at 15 min, UI state `error` if the loop task actually died.
-3. Watchdog state files: `watchdog_stall_restarts.json` (new) joins `watchdog_restarts.json`.
+3. On a telegram-poll death: in-process respawn (up to 5/day) + **TELEGRAM POLL not responding** watchdog alert if staleness persists past the long-poll floor.
+4. A hung `/command` now times out after 30s (logged, skipped) — subsequent messages keep flowing.
+5. Watchdog state files: `watchdog_stall_restarts.json` (new) joins `watchdog_restarts.json`; new `/api/health` keys: `loop_never_beat`, `telegram_poll_*`.

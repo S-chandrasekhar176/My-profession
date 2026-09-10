@@ -49,6 +49,13 @@ _CANARY_REPEAT_MINUTES = 45
 _PUSH_INTERVAL_S = 5
 _CANARY_INTERVAL_S = 120
 
+# v0.4.21: the 11:16-IST silence — one hung command handler used to freeze
+# the poll loop forever (dispatch is inline), and the fire-and-forget loop
+# tasks had no supervision: a dead poll task meant a SILENTLY dead bot.
+_HANDLER_TIMEOUT_S = 30.0     # per update-handler budget (commands hit DB+HTTP)
+_TG_LOOP_RESPAWN_CAP = 5      # in-process respawns per loop per day
+_TG_POLL_STALE_BASE_S = 120.0 # watchdog alert floor (long-poll can block ~poll_timeout+12)
+
 # v0.4.13 canary false-positive fix (live 2026-09-07 10:50 & 11:58 IST:
 # "engine is scanning" flagged as blind). States in which the bot is NOT
 # blind during market hours:
@@ -149,7 +156,64 @@ class InteractiveTelegramBot:
         self._last_canary: Dict[str, float] = {}   # canary key -> ts
         self._tasks: List[asyncio.Task] = []
         self._stopping = False
+        # v0.4.21 loop health: monotonic beat of the last completed poll
+        # cycle + per-loop respawn counters (supervision, see start()).
+        self._poll_beat: float = 0.0
+        self._respawn_counts: Dict[str, int] = {}
+        self._loop_deaths: Dict[str, str] = {}     # loop name -> death reason
         self.started_at = datetime.now(IST)
+
+    # ── v0.4.21: loop supervision + health observability ─────────────
+
+    def poll_stalled_seconds(self) -> Optional[float]:
+        """Seconds since the poll loop last completed a getUpdates cycle.
+
+        None — interactive bot not running (disabled/unconfigured/stopped).
+        Note: one long-poll cycle can legitimately block ~poll_timeout+12s,
+        so consumers must alert only above that floor (watchdog uses
+        max(TG_POLL_STALE_BASE_S, poll_timeout + 60)).
+        """
+        if not self._tasks or self._stopping or self._poll_beat <= 0.0:
+            return None
+        return round(max(time.monotonic() - self._poll_beat, 0.0), 1)
+
+    def _on_loop_task_done(self, task: "asyncio.Task", name: str, factory) -> None:
+        """Done-callback for the telegram loop tasks (supervision).
+
+        Never raises. Logs a critical on ANY exit while not stopping, records
+        the reason for /api/health, and respawns the loop in-process up to
+        _TG_LOOP_RESPAWN_CAP times per day — a silently dead poll loop was
+        the 11:16-IST 'bot stopped responding' failure mode.
+        """
+        try:
+            if self._stopping:
+                return
+            reason = "returned unexpectedly"
+            if task.cancelled():
+                reason = "cancelled"
+            else:
+                exc = task.exception()
+                if exc is not None:
+                    reason = f"died: {exc!r}"
+            self._loop_deaths[name] = reason
+            logger.critical("Telegram loop '%s' %s while bot is active", name, reason)
+            count = self._respawn_counts.get(name, 0)
+            if count >= _TG_LOOP_RESPAWN_CAP:
+                logger.critical(
+                    "Telegram loop '%s' respawn cap reached (%d today) — NOT respawning; "
+                    "bot is DEAF until manual restart",
+                    name, count,
+                )
+                return
+            self._respawn_counts[name] = count + 1
+            new_task = asyncio.create_task(factory(), name=f"{name}-respawn{count + 1}")
+            self._tasks = [t for t in self._tasks if t is not task] + [new_task]
+            new_task.add_done_callback(
+                lambda t, n=name, f=factory: self._on_loop_task_done(t, n, f)
+            )
+            logger.warning("Telegram loop '%s' respawned (attempt %d/%d)", name, count + 1, _TG_LOOP_RESPAWN_CAP)
+        except Exception:
+            logger.exception("telegram loop supervision callback failed")
 
     # ------------------------------------------------------------------
     # Telegram API helpers
@@ -640,6 +704,9 @@ class InteractiveTelegramBot:
         """Long-poll getUpdates and dispatch messages/callbacks. Never raises."""
         consecutive_errors = 0
         while not self._stopping:
+            # v0.4.21 heartbeat: refreshed at the TOP of every cycle (after
+            # each long-poll return), surfaced via poll_stalled_seconds().
+            self._poll_beat = time.monotonic()
             try:
                 data = await self._tg(
                     "getUpdates",
@@ -649,6 +716,12 @@ class InteractiveTelegramBot:
                 )
                 if data is None:
                     consecutive_errors += 1
+                    if consecutive_errors % 20 == 0:
+                        logger.critical(
+                            "poll_loop: %d consecutive failed getUpdates calls — "
+                            "bot effectively deaf (token/network?)",
+                            consecutive_errors,
+                        )
                     await asyncio.sleep(min(5 * consecutive_errors, 30))
                     continue
                 consecutive_errors = 0
@@ -658,13 +731,36 @@ class InteractiveTelegramBot:
                 for update in data.get("result", []):
                     self._offset = max(self._offset, update.get("update_id", 0) + 1)
                     if "callback_query" in update:
-                        await self._handle_callback(update["callback_query"])
+                        # v0.4.21: bounded dispatch — a hung handler (DB/HTTP
+                        # wedge) used to freeze ALL subsequent messages forever
+                        # (the 11:16-IST silence). Timeout cancels the handler;
+                        # Repository.close() is shielded so its session still
+                        # returns to the pool cleanly.
+                        try:
+                            await asyncio.wait_for(
+                                self._handle_callback(update["callback_query"]),
+                                timeout=_HANDLER_TIMEOUT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "callback handler timed out after %ss — update skipped",
+                                _HANDLER_TIMEOUT_S,
+                            )
                     elif "message" in update:
                         msg = update["message"]
                         if self._authorized((msg.get("chat") or {}).get("id")):
                             text = msg.get("text", "")
                             if text.startswith("/"):
-                                await self._handle_command(text)
+                                try:
+                                    await asyncio.wait_for(
+                                        self._handle_command(text),
+                                        timeout=_HANDLER_TIMEOUT_S,
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.error(
+                                        "command '%s' timed out after %ss",
+                                        text.split()[0], _HANDLER_TIMEOUT_S,
+                                    )
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -722,18 +818,28 @@ class InteractiveTelegramBot:
             logger.info("Interactive Telegram not started — credentials missing")
             return
         self._stopping = False
+        self._respawn_counts.clear()
+        self._loop_deaths.clear()
         self._tasks = [
-            asyncio.create_task(self.push_loop(), name="tg-interactive-push"),
-            asyncio.create_task(self.poll_loop(), name="tg-interactive-poll"),
+            self._supervised_create("tg-interactive-push", self.push_loop),
+            self._supervised_create("tg-interactive-poll", self.poll_loop),
         ]
         if self.canary_enabled:
-            self._tasks.append(asyncio.create_task(self.canary_loop(), name="tg-canary"))
+            self._tasks.append(self._supervised_create("tg-canary", self.canary_loop))
         logger.info(
             "Interactive Telegram started (chat=%s, poll_timeout=%ss, canary=%s)",
             self._chat_id,
             self._poll_timeout,
             self.canary_enabled,
         )
+
+    def _supervised_create(self, name: str, factory) -> "asyncio.Task":
+        """Create a loop task with death-supervision + respawn (v0.4.21)."""
+        task = asyncio.create_task(factory(), name=name)
+        task.add_done_callback(
+            lambda t, n=name, f=factory: self._on_loop_task_done(t, n, f)
+        )
+        return task
 
     async def stop(self) -> None:
         self._stopping = True
