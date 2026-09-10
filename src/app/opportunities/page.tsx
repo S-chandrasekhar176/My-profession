@@ -814,7 +814,9 @@ function mapRawToOpportunityData(
   // 0.8-confidence / 70%-winrate placeholders). UI renders '—' for 0.
   const kronosScore = Number(opp.kronosScore ?? opp.confidence ?? 0);
   const quantity = Number(opp.quantity ?? opp.sizing?.quantity ?? 1);
-  const margin = Number(opp.margin ?? opp.capital_required ?? opp.capitalRequired ?? (quantity * entry * 0.2));
+  // v0.4.19: fallback = full notional (qty x entry) — matches the engine's
+  // capital_required (sizing.position_size = entry x qty, no leverage factor).
+  const margin = Number(opp.margin ?? opp.capital_required ?? opp.capitalRequired ?? (quantity * entry));
 
   // Risk gates normalization
   let riskGates: RiskGate[] = [];

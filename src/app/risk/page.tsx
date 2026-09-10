@@ -196,7 +196,11 @@ export default function RiskDashboardPage() {
     if (typeof status.capital_in_use === 'number' && status.capital_in_use > 0) {
       return status.capital_in_use;
     }
-    return enginePositions.reduce((sum, p) => sum + ((Number(p.entry_price) || 0) * (Number(p.remaining_qty ?? p.quantity) || 0) * 0.2), 0);
+    // v0.4.19: fallback now full notional (entry x qty) to match the engine's
+    // capital_in_use (repo.get_capital_in_use sums invested_amount = entry x
+    // qty, no leverage). The old x0.2 fallback showed 5x less than the
+    // backend value it was standing in for.
+    return enginePositions.reduce((sum, p) => sum + ((Number(p.entry_price) || 0) * (Number(p.remaining_qty ?? p.quantity) || 0)), 0);
   }, [status.capital_in_use, enginePositions]);
 
   const netPnl = useMemo(() => {

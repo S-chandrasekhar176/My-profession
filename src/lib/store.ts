@@ -83,7 +83,9 @@ export function normalizeOpportunity(raw: any): Opportunity {
     conviction_label: raw.conviction_label,
     risk_gates: raw.risk_gates || raw.riskGates || (raw.risk_result ? raw.risk_result.all_gates : undefined),
     riskGates: raw.riskGates || raw.risk_gates || (raw.risk_result ? raw.risk_result.all_gates : undefined),
-    margin: Number(raw.margin ?? raw.capital_required ?? raw.capitalRequired ?? (raw.quantity && entry ? entry * raw.quantity * 0.2 : 0)),
+    // v0.4.19: fallback = full notional (entry x qty) — matches engine
+    // capital_required semantics (no leverage factor).
+    margin: Number(raw.margin ?? raw.capital_required ?? raw.capitalRequired ?? (raw.quantity && entry ? entry * raw.quantity : 0)),
     capitalRequired: Number(raw.capitalRequired ?? raw.capital_required ?? raw.margin ?? 0),
     quantity: Number(raw.quantity ?? raw.sizing?.quantity ?? 1),
     ttlSeconds: raw.ttl_seconds ?? raw.ttlSeconds,

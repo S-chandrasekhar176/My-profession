@@ -639,7 +639,17 @@ export default function DashboardPage() {
           ? raw.capital.total
           : 1000000.0;
 
-    const capitalUsed = +(positionsList.reduce((sum, p) => sum + (p.entry * p.qty * 0.2), 0)).toFixed(2);
+    // v0.4.19: Capital Used = open-position EXPOSURE (entry x qty, full notional).
+    // The engine allocates capital on a full-notional basis everywhere —
+    // PositionSizer (position_size = entry x qty), G12 margin context,
+    // daily-risk capital_in_use and repo.get_capital_in_use all sum
+    // entry x qty with NO leverage factor. The previous x0.2 (5x MIS margin)
+    // shown here made the Dashboard report 5x less usage than the engine's
+    // own accounting and than the Trades tab's "Total Invested" (Sep-10:
+    // Dashboard 13,447.65 / 2.7% vs Trades 67,238 for the same 2 positions).
+    // The 5x margin figure is still shown as an informational hint below
+    // the utilization bar.
+    const capitalUsed = +(positionsList.reduce((sum, p) => sum + (p.entry * p.qty), 0)).toFixed(2);
     const freeCapital = +(totalCapital - capitalUsed + todayPnl).toFixed(2);
     const todayPnlPercent = totalCapital > 0 ? +((todayPnl / totalCapital) * 100).toFixed(2) : 0;
 
@@ -1000,7 +1010,10 @@ export default function DashboardPage() {
               </div>
               <div>
                 <p className="text-[11px] text-ub-text-muted uppercase tracking-wider">Capital Used</p>
-                <p className="text-sm font-bold text-ub-warning font-mono mt-0.5">
+                <p
+                  className="text-sm font-bold text-ub-warning font-mono mt-0.5"
+                  title="Open-position exposure (entry x qty), full notional — same accounting as the engine and the Trades tab 'Total Invested'"
+                >
                   {formatINR(data.capitalUsed)}
                 </p>
               </div>
@@ -1026,6 +1039,9 @@ export default function DashboardPage() {
                 value={capitalUsedPct}
                 className="h-2 bg-ub-border [&>div]:bg-ub-accent"
               />
+              <p className="text-[10px] text-ub-text-muted">
+                = open-position exposure (entry × qty). ≈ {formatINR(+(data.capitalUsed * 0.2).toFixed(2))} margin at 5x MIS leverage (broker view).
+              </p>
             </div>
             <Separator className="my-3 bg-ub-border" />
             <div className="flex items-center justify-between">

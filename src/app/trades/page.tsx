@@ -360,7 +360,12 @@ function PositionsTab({
               <Target className="h-4.5 w-4.5 text-ub-warning" />
             </div>
             <div>
-              <p className="text-[11px] uppercase tracking-wider text-ub-text-muted">Total Invested</p>
+              <p
+                className="text-[11px] uppercase tracking-wider text-ub-text-muted"
+                title="Sum of open-position notional (entry x qty) — same accounting as the engine and the Dashboard 'Capital Used'"
+              >
+                Total Invested
+              </p>
               <p className="text-xl font-bold text-ub-text-primary">{INR_SHORT(totalInvested)}</p>
             </div>
           </CardContent>
