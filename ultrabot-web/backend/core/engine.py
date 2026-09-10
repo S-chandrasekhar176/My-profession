@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from core.engine_state import EngineState, EngineMode
+from core.loop_health import compute_loop_stalled_seconds
 from core.market_hours import MarketHours
 from options.option_chain import OptionChainFetcher
 from options.strike_selector import StrikeSelector
@@ -799,6 +800,14 @@ class UltraBotEngine:
 
             # Start main loop as background task
             self._main_task = asyncio.create_task(self._main_loop())
+            # v0.4.21 loop supervision: a main-loop task that DIES (unhandled
+            # exception before its first beat, or a cancellation that is not
+            # part of a graceful stop) used to leave state=RUNNING with
+            # _loop_last_beat=None forever — the Sep-9 "UI said scanning for
+            # two hours while nothing scanned" failure. The done-callback now
+            # flips the state to ERROR so the UI, /api/health and the
+            # watchdog all see the truth immediately.
+            self._main_task.add_done_callback(self._on_main_task_done)
             logger.info(
                 "Engine started: mode=%s, broker=%s, session=%s, strategies=%s",
                 mode,
@@ -1092,6 +1101,56 @@ class UltraBotEngine:
             len(trades), daily_pnl, len(trades), wins, losses, breakeven,
             consecutive_losses,
         )
+
+    def _on_main_task_done(self, task: "asyncio.Task") -> None:
+        """v0.4.21 loop supervision (done-callback for ``self._main_task``).
+
+        Catches the silent-death modes of ``_main_loop``:
+          * unhandled exception before the first beat (pre-``while`` setup),
+          * an exception escaping the in-loop ``try`` (e.g. from the handler
+            itself) — loop exits while ``state`` stays RUNNING,
+          * cancellation that is not part of ``stop()`` (state would stay
+            RUNNING with the loop gone).
+
+        In every case where the engine still CLAIMS to be running, flip the
+        state to ERROR so /api/health, the UI and the watchdog stop trusting
+        a loop that no longer exists. Called from the event-loop thread; must
+        never raise.
+        """
+        try:
+            running_like = self.state in (
+                EngineState.RUNNING, EngineState.PAUSED, EngineState.SCANNING
+            )
+            if not running_like:
+                # Graceful stop() or a max-retries ERROR exit — state already
+                # truthful, nothing to do.
+                return
+            if task.cancelled():
+                logger.critical(
+                    "Main loop task CANCELLED while state=%s — flipping to error "
+                    "(loop supervision)",
+                    self.state.value,
+                )
+            elif task.exception() is not None:
+                logger.critical(
+                    "Main loop task DIED with exception while state=%s — flipping "
+                    "to error (loop supervision): %s",
+                    self.state.value,
+                    task.exception(),
+                    exc_info=task.exception(),
+                )
+            else:
+                # Returned normally while state is running-like: the loop can
+                # only do that via the max-retries path (which sets ERROR) or
+                # the state flipped concurrently — treat defensively anyway.
+                logger.critical(
+                    "Main loop task returned unexpectedly while state=%s — "
+                    "flipping to error (loop supervision)",
+                    self.state.value,
+                )
+            self.state = EngineState.ERROR
+        except Exception:  # noqa: BLE001 — a supervision callback must not raise
+            logger.exception("loop supervision callback failed")
 
     async def _main_loop(self) -> None:
         """Core scanning loop. Runs while state is RUNNING or PAUSED.
@@ -5376,11 +5435,17 @@ class UltraBotEngine:
             # state=running means the main loop has not completed an
             # iteration recently — the UI/watchdog must treat that as
             # NOT healthy even though the process answers HTTP.
+            # v0.4.21 (loop_health): a running-like engine whose beat is None
+            # is now reported as NEVER_BEAT_SENTINEL (-1.0) + loop_never_beat
+            # instead of None — the Sep-9 "loop dead post-restart" case used
+            # to read as healthy forever.
             "loop_last_beat": self._loop_last_beat.isoformat() if self._loop_last_beat else None,
-            "loop_stalled_seconds": (
-                round((datetime.now(IST) - self._loop_last_beat).total_seconds(), 1)
-                if self._loop_last_beat and self.state in (EngineState.RUNNING, EngineState.PAUSED, EngineState.SCANNING)
-                else None
+            "loop_stalled_seconds": compute_loop_stalled_seconds(
+                self._loop_last_beat, self.state
+            ),
+            "loop_never_beat": (
+                self._loop_last_beat is None
+                and self.state in (EngineState.RUNNING, EngineState.PAUSED, EngineState.SCANNING)
             ),
             "regime": self.current_regime,
             "vix": self.vix,

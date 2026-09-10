@@ -30,6 +30,7 @@ from brokers.factory import BrokerFactory
 from feeds.yahoo_historical import YahooHistoricalFeed
 from feeds.feed_manager import FeedManager
 from core.engine import UltraBotEngine
+from core.loop_health import compute_loop_stalled_seconds
 from core.market_hours import MarketHours
 from core.session_manager import SessionManager
 from scanner.kronos.kronos_scanner import KronosScanner
@@ -413,16 +414,21 @@ async def health():
     # credentials) can alert when the engine state is "running"-like but the
     # loop has stopped iterating (the invisible Sep-9 13:35 failure mode).
     # A running engine with a stale beat renders degraded here.
+    # v0.4.21 (loop_health): running-like state with NO beat is now reported
+    # as NEVER_BEAT_SENTINEL (-1.0) + loop_never_beat=true — previously it
+    # read as None (healthy), which is exactly how the post-restart dead
+    # loop of Sep-9 stayed invisible.
     loop_stalled = None
+    loop_never_beat = False
     try:
         eng = getattr(app.state, "engine", None)
         if eng is not None:
             beat = getattr(eng, "_loop_last_beat", None)
             state_val = getattr(getattr(eng, "state", None), "value", "")
-            if beat is not None and state_val in ("running", "paused", "scanning"):
-                loop_stalled = round(
-                    (datetime.now(IST) - beat).total_seconds(), 1
-                )
+            loop_stalled = compute_loop_stalled_seconds(beat, state_val)
+            loop_never_beat = bool(
+                beat is None and state_val in ("running", "paused", "scanning")
+            )
     except Exception:
         loop_stalled = None
 
@@ -444,6 +450,7 @@ async def health():
         "broker": broker_status,
         "feed": feed_status,
         "loop_stalled_seconds": loop_stalled,
+        "loop_never_beat": loop_never_beat,
     }
 
 
