@@ -40,6 +40,8 @@ import urllib.request
 from datetime import datetime, date
 from pathlib import Path
 
+import sys
+
 BASE = "http://127.0.0.1:8000"
 PERSIST = Path("/home/z/my-project/bot_analysis/persist")
 SNAP = PERSIST / "snapshots"
@@ -53,6 +55,54 @@ VENV_PY = "/home/z/my-project/bot_analysis/venv/bin/python"
 APP_DIR = "/home/z/my-project/bot_analysis/Awesome_DE/ultrabot-web/backend"
 REPORTS = APP_DIR + "/reports"
 BACKEND_LOG = LOGS / "backend.log"
+
+# v0.4.21: shared loop-health policy (pure, zero-dep) — the backend imports
+# the same module for /api/health + /api/engine/status, so the watchdog, the
+# health endpoint and the engine can never disagree about stall semantics.
+sys.path.insert(0, APP_DIR)
+try:
+    from core.loop_health import (
+        NEVER_BEAT_SENTINEL,
+        STALL_RESTART_GUARD_SECONDS,
+        STALL_RESTART_MAX_PER_DAY,
+        STALL_RESTART_THRESHOLD_SECONDS,
+        market_open_ist,
+        should_stall_restart,
+    )
+except Exception:  # pragma: no cover — host may run an older checkout
+    NEVER_BEAT_SENTINEL = -1.0
+    STALL_RESTART_GUARD_SECONDS = 180.0
+    STALL_RESTART_MAX_PER_DAY = 2
+    STALL_RESTART_THRESHOLD_SECONDS = 900.0
+
+    def market_open_ist(now=None):
+        from datetime import timezone, timedelta as _td
+
+        local = (now or datetime.now()).astimezone(timezone(_td(hours=5, minutes=30)))
+        if local.weekday() >= 5:
+            return False
+        m = local.hour * 60 + local.minute
+        return 9 * 60 + 15 <= m <= 15 * 60 + 30
+
+    def should_stall_restart(stalled_seconds, stall_restarts_today, market_open,
+                             stop_marker_fresh, seconds_since_last_restart,
+                             threshold=900.0, max_per_day=2, guard_seconds=180.0):
+        if stalled_seconds is None:
+            return False, "no stall data"
+        if stalled_seconds >= 0 and stalled_seconds < threshold:
+            return False, "below threshold"
+        if stall_restarts_today >= max_per_day:
+            return False, "cap reached"
+        if not market_open:
+            return False, "market closed"
+        if stop_marker_fresh:
+            return False, "stop marker fresh"
+        if seconds_since_last_restart is not None and seconds_since_last_restart < guard_seconds:
+            return False, "restart guard"
+        return True, "stall sustained"
+
+
+TG_POLL_STALE_BASE_S = 120.0  # v0.4.21: alert floor for telegram poll staleness
 
 POLL_INTERVAL = 15
 SNAPSHOT_INTERVAL = 900
@@ -108,22 +158,32 @@ def health_ok() -> tuple[bool, int]:
 # /api/engine/status now exposes loop_stalled_seconds; alert (but do NOT
 # restart — a stall is not a death) when it exceeds the threshold.
 LOOP_STALL_ALERT_SECONDS = 300.0
+STALL_RESTART_COUNTER = PERSIST / "watchdog_stall_restarts.json"
+_last_restart_ts = 0.0  # epoch of the most recent restart (any path)
 
 
-def loop_stalled_seconds() -> float | None:
-    """loop_stalled_seconds from the unauthenticated /api/health payload
-    (the engine/status endpoint requires API credentials the watchdog does
-    not hold), or None if unavailable."""
+def fetch_health() -> dict | None:
+    """Parsed /api/health payload (single fetch per watchdog poll)."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(BASE + "/api/health", timeout=5) as r:
             if r.status != 200:
                 return None
-            import json as _json
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
 
-            data = _json.loads(r.read().decode("utf-8", "replace"))
-            raw = data.get("loop_stalled_seconds")
-            return float(raw) if raw is not None else None
+
+def loop_stalled_seconds(health: dict | None = None) -> float | None:
+    """loop_stalled_seconds from the unauthenticated /api/health payload
+    (the engine/status endpoint requires API credentials the watchdog does
+    not hold), or None if unavailable."""
+    try:
+        data = health if health is not None else fetch_health()
+        if data is None:
+            return None
+        raw = data.get("loop_stalled_seconds")
+        return float(raw) if raw is not None else None
     except Exception:
         return None
 
@@ -303,10 +363,48 @@ def restarts_today() -> int:
 def bump_restart_counter() -> int:
     count = restarts_today() + 1
     try:
-        RESTART_COUNTER.write_text(json.dumps({"date": date.today().isoformat(), "count": count}))
+        data = {}
+        try:
+            data = json.loads(RESTART_COUNTER.read_text())
+        except Exception:
+            data = {}
+        data["date"] = date.today().isoformat()
+        data["count"] = count
+        RESTART_COUNTER.write_text(json.dumps(data))
     except Exception:
         pass
     return count
+
+
+def stall_restarts_today() -> int:
+    try:
+        data = json.loads(STALL_RESTART_COUNTER.read_text())
+        if data.get("date") == date.today().isoformat():
+            return int(data.get("stall_count", 0))
+    except Exception:
+        pass
+    return 0
+
+
+def bump_stall_restart_counter() -> int:
+    count = stall_restarts_today() + 1
+    try:
+        STALL_RESTART_COUNTER.write_text(
+            json.dumps({"date": date.today().isoformat(), "stall_count": count})
+        )
+    except Exception:
+        pass
+    return count
+
+
+def seconds_since_last_restart() -> float:
+    """Seconds since the most recent restart of ANY path (death or stall).
+    Drives the shared anti-storm guard so the two recovery paths cannot
+    restart on top of each other."""
+    global _last_restart_ts
+    if _last_restart_ts <= 0.0:
+        return None
+    return max(time.time() - _last_restart_ts, 0.0)
 
 
 def stop_marker_fresh() -> bool:
@@ -331,6 +429,8 @@ def start_backend() -> None:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    global _last_restart_ts
+    _last_restart_ts = time.time()
     log("backend (re)start issued")
 
 
@@ -374,11 +474,17 @@ def main() -> None:
     was_up = True
     backoff_n = 0
     loop_stall_alerted = False
+    stall_streak = 0  # v0.4.21: consecutive above-threshold stall readings
+    tg_poll_alerted = False  # v0.4.21: telegram-poll deaf alert (edge-triggered)
 
     while True:
         try:
             up, latency = health_ok()
             heartbeat("UP" if up else "DOWN", latency if up else -1)
+
+            # v0.4.21: one health fetch per poll, shared by the stall check
+            # and the telegram-poll liveness check.
+            health = fetch_health() if up else None
 
             if up:
                 if not was_up:
@@ -387,19 +493,107 @@ def main() -> None:
                 last_up_iso = datetime.now().isoformat(timespec="seconds")
 
                 # v0.4.18: loop-stall alert (edge-triggered, no restart).
+                # v0.4.21: a never-beat loop (-1 sentinel from /api/health,
+                # the post-restart dead-loop case) also alerts, and a
+                # SUSTAINED stall now escalates to an automatic
+                # stall-restart — rails live in core/loop_health.
+                # should_stall_restart (threshold, daily cap, market-open
+                # gate, intentional-stop marker, shared restart guard).
                 try:
-                    stalled = loop_stalled_seconds()
-                    if stalled is not None and stalled >= LOOP_STALL_ALERT_SECONDS and not loop_stall_alerted:
+                    stalled = loop_stalled_seconds(health)
+                    stalled_bad = (
+                        stalled is not None
+                        and (stalled >= LOOP_STALL_ALERT_SECONDS or stalled == NEVER_BEAT_SENTINEL)
+                    )
+                    if stalled_bad and not loop_stall_alerted:
                         loop_stall_alerted = True
-                        log(f"ENGINE LOOP STALLED {stalled:.0f}s (process alive) — alerting")
+                        stall_label = (
+                            "never beat (post-restart dead loop)"
+                            if stalled == NEVER_BEAT_SENTINEL
+                            else f"{stalled:.0f}s"
+                        )
+                        log(f"ENGINE LOOP STALLED {stall_label} (process alive) — alerting")
                         telegram_alert(
                             "🟠 UltraBot: ENGINE LOOP STALLED — backend answers but the "
-                            f"main loop has not iterated for {stalled:.0f}s "
+                            f"main loop has not iterated for {stall_label} "
                             f"({datetime.now().strftime('%H:%M:%S')} IST). "
                             "Positions/exits are NOT being managed. Manual restart recommended."
                         )
-                    elif stalled is not None and stalled < LOOP_STALL_ALERT_SECONDS:
+                    elif stalled is not None and 0 <= stalled < LOOP_STALL_ALERT_SECONDS:
                         loop_stall_alerted = False
+
+                    # v0.4.21 escalation — alerting alone does not manage
+                    # positions; a wedged loop during market hours is worse
+                    # than a restart with the proven rehydration path.
+                    if stalled is not None and (
+                        stalled >= STALL_RESTART_THRESHOLD_SECONDS or stalled == NEVER_BEAT_SENTINEL
+                    ):
+                        stall_streak += 1
+                    else:
+                        stall_streak = 0
+                    if stall_streak >= STALL_STREAK_NEEDED:
+                        decision, reason = should_stall_restart(
+                            stalled,
+                            stall_restarts_today(),
+                            market_open_ist(),
+                            stop_marker_fresh(),
+                            seconds_since_last_restart(),
+                        )
+                        if decision:
+                            stall_count = bump_stall_restart_counter()
+                            stall_label = (
+                                "never beat (post-restart dead loop)"
+                                if stalled == NEVER_BEAT_SENTINEL
+                                else f"{stalled:.0f}s"
+                            )
+                            log(
+                                f"STALL-RESTART #{stall_count}/{STALL_RESTART_MAX_PER_DAY} "
+                                f"issued ({reason})"
+                            )
+                            telegram_alert(
+                                "🟠 UltraBot: ENGINE LOOP STALL-RESTART — loop "
+                                f"{stall_label} without iterating while the process "
+                                f"answers. Auto-restarting "
+                                f"({stall_count}/{STALL_RESTART_MAX_PER_DAY} today, "
+                                f"{datetime.now().strftime('%H:%M:%S')} IST). "
+                                "Position rehydration will restore management."
+                            )
+                            start_backend()
+                            stall_streak = 0
+                            loop_stall_alerted = False
+                        else:
+                            log(f"stall escalation withheld: {reason}")
+                except Exception:
+                    pass
+
+                # v0.4.21: telegram-poll liveness — the interactive bot can go
+                # deaf (dead/hung poll task) while the backend and engine are
+                # otherwise fine (the 11:16-IST report). /api/health exposes
+                # the poll heartbeat; alert when stale beyond the long-poll
+                # floor. Not a restart trigger: the backend respawns the loop
+                # in-process (cap 5/day); this is the escalation beacon.
+                try:
+                    if health is not None and "telegram_poll_stalled_seconds" in health:
+                        tg_stalled = health.get("telegram_poll_stalled_seconds")
+                        tg_timeout = float(health.get("telegram_poll_timeout") or 0)
+                        tg_limit = max(TG_POLL_STALE_BASE_S, tg_timeout + 60.0)
+                        tg_respawns = int(health.get("telegram_poll_respawns") or 0)
+                        if tg_stalled is not None and float(tg_stalled) > tg_limit:
+                            if not tg_poll_alerted:
+                                tg_poll_alerted = True
+                                log(
+                                    "TELEGRAM POLL stale %.0fs (> %.0fs floor, respawns=%d) — bot deaf on Telegram"
+                                    % (float(tg_stalled), tg_limit, tg_respawns)
+                                )
+                                telegram_alert(
+                                    "🟠 UltraBot: TELEGRAM POLL LOOP not responding for "
+                                    f"{float(tg_stalled):.0f}s (respawns today: {tg_respawns}) "
+                                    f"({datetime.now().strftime('%H:%M:%S')} IST). "
+                                    "Bot is deaf on Telegram — engine may still be trading. "
+                                    "Manual backend restart recommended if this persists."
+                                )
+                        elif tg_stalled is not None:
+                            tg_poll_alerted = False
                 except Exception:
                     pass
             else:
@@ -417,11 +611,19 @@ def main() -> None:
                         )
                     else:
                         bump = restarts_today()
+                        since = seconds_since_last_restart()
                         if bump >= MAX_RESTARTS_PER_DAY:
                             log(f"restart cap reached ({bump}/{MAX_RESTARTS_PER_DAY}) — NOT restarting")
                             telegram_alert(
                                 "🔴 UltraBot: backend DOWN and restart cap reached "
                                 f"({bump} today). Manual attention needed."
+                            )
+                        elif since is not None and since < STALL_RESTART_GUARD_SECONDS:
+                            # v0.4.21: a stall-restart may have just bounced the
+                            # backend — do not race it with a death-restart.
+                            log(
+                                "backend DOWN but a restart was issued "
+                                f"{since:.0f}s ago (< {STALL_RESTART_GUARD_SECONDS:.0f}s guard) — waiting"
                             )
                         else:
                             wait = min(BACKOFF_BASE * (2 ** backoff_n), BACKOFF_CAP)
@@ -441,7 +643,10 @@ def main() -> None:
                     # still down across polls — try recovery if cap allows
                     if not stop_marker_fresh():
                         bump = restarts_today()
-                        if bump < MAX_RESTARTS_PER_DAY and backoff_n < 4:
+                        since = seconds_since_last_restart()
+                        if bump < MAX_RESTARTS_PER_DAY and backoff_n < 4 and not (
+                            since is not None and since < STALL_RESTART_GUARD_SECONDS
+                        ):
                             wait = min(BACKOFF_BASE * (2 ** backoff_n), BACKOFF_CAP)
                             log(f"backend still DOWN — retry in {wait:.0f}s")
                             time.sleep(wait)

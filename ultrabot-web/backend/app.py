@@ -30,6 +30,7 @@ from brokers.factory import BrokerFactory
 from feeds.yahoo_historical import YahooHistoricalFeed
 from feeds.feed_manager import FeedManager
 from core.engine import UltraBotEngine
+from core.loop_health import compute_loop_stalled_seconds
 from core.market_hours import MarketHours
 from core.session_manager import SessionManager
 from scanner.kronos.kronos_scanner import KronosScanner
@@ -413,18 +414,47 @@ async def health():
     # credentials) can alert when the engine state is "running"-like but the
     # loop has stopped iterating (the invisible Sep-9 13:35 failure mode).
     # A running engine with a stale beat renders degraded here.
+    # v0.4.21 (loop_health): running-like state with NO beat is now reported
+    # as NEVER_BEAT_SENTINEL (-1.0) + loop_never_beat=true — previously it
+    # read as None (healthy), which is exactly how the post-restart dead
+    # loop of Sep-9 stayed invisible.
     loop_stalled = None
+    loop_never_beat = False
     try:
         eng = getattr(app.state, "engine", None)
         if eng is not None:
             beat = getattr(eng, "_loop_last_beat", None)
             state_val = getattr(getattr(eng, "state", None), "value", "")
-            if beat is not None and state_val in ("running", "paused", "scanning"):
-                loop_stalled = round(
-                    (datetime.now(IST) - beat).total_seconds(), 1
-                )
+            loop_stalled = compute_loop_stalled_seconds(beat, state_val)
+            loop_never_beat = bool(
+                beat is None and state_val in ("running", "paused", "scanning")
+            )
     except Exception:
         loop_stalled = None
+
+    # v0.4.21: interactive-telegram poll health — the poll task previously
+    # had no supervision NOR heartbeat, so a dead/hung poll loop (the
+    # 11:16-IST "bot stopped responding" event) was invisible from outside.
+    tg_poll_stalled = None
+    tg_poll_timeout = None
+    tg_poll_alive = False
+    tg_poll_respawns = 0
+    tg_poll_last_death = None
+    try:
+        itg = getattr(app.state, "telegram_interactive", None)
+        if itg is not None and not getattr(itg, "_stopping", True):
+            tg_poll_stalled = itg.poll_stalled_seconds()
+            tg_poll_timeout = float(getattr(itg, "_poll_timeout", 0) or 0)
+            # one long-poll cycle can block ~poll_timeout+12s legitimately —
+            # alive = beat within max(120s, poll_timeout+60s)
+            tg_poll_alive = (
+                tg_poll_stalled is not None
+                and tg_poll_stalled <= max(120.0, tg_poll_timeout + 60.0)
+            )
+            tg_poll_respawns = int(itg._respawn_counts.get("tg-interactive-poll", 0))
+            tg_poll_last_death = itg._loop_deaths.get("tg-interactive-poll")
+    except Exception:
+        tg_poll_stalled = None
 
     try:
         from db.database import async_session_factory
@@ -444,6 +474,12 @@ async def health():
         "broker": broker_status,
         "feed": feed_status,
         "loop_stalled_seconds": loop_stalled,
+        "loop_never_beat": loop_never_beat,
+        "telegram_poll_alive": tg_poll_alive,
+        "telegram_poll_stalled_seconds": tg_poll_stalled,
+        "telegram_poll_timeout": tg_poll_timeout,
+        "telegram_poll_respawns": tg_poll_respawns,
+        "telegram_poll_last_death": tg_poll_last_death,
     }
 
 

@@ -3,6 +3,11 @@
 Provides OHLCV historical and live candlestick data for TradingView / Lightweight Charts,
 integrating Yahoo Finance real-time market data and connected broker feeds.
 """
+import asyncio  # v0.4.21 (wave 3): MUST be importable at module scope —
+# _get_fyers_quotes_broker() previously referenced asyncio.iscoroutine() in
+# its cleanup without an in-scope import; the NameError was swallowed by
+# `except Exception: pass` and Repository.close() was never awaited,
+# leaking one aiosqlite connection per /api/live-quotes poll.
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -64,21 +69,26 @@ async def _get_fyers_quotes_broker() -> Optional[Any]:
     token_sig = None
     creds = {}
     try:
-        session = async_session_factory()
-        repo = Repository(session)
-        try:
-            cred = await repo.get_broker_credentials("fyers")
-        finally:
-            if hasattr(repo, "close"):
-                try:
-                    res = repo.close()
-                    if asyncio.iscoroutine(res):
-                        await res
-                except Exception:
-                    pass
-        if cred is None or not getattr(cred, "encrypted_credentials", None):
+        # v0.4.21 (wave 3) — session lifecycle is owned by context managers.
+        # The previous hand-rolled cleanup called asyncio.iscoroutine() WITHOUT
+        # importing asyncio in this scope; the NameError was silently eaten by
+        # `except Exception: pass`, repo.close() was never awaited (the
+        # "coroutine 'Repository.close' was never awaited" RuntimeWarning at
+        # the /api/live-quotes frame), and the AsyncSession's aiosqlite
+        # connection leaked to the garbage collector on EVERY poll — the
+        # header banner polls every ~3s per open tab. With NullPool each
+        # leaked connection also strands its dedicated aiosqlite daemon
+        # thread (the "Thread-2884 … non-checked-in connection" storm).
+        # `async with` closes the session on every path — success, error,
+        # cancellation. Repository.close() is idempotent (wave 2), so the
+        # __aexit__ close plus the session close can never double-release.
+        async with async_session_factory() as session:
+            async with Repository(session) as repo:
+                cred = await repo.get_broker_credentials("fyers")
+                encrypted = getattr(cred, "encrypted_credentials", None)
+        if cred is None or not encrypted:
             return None
-        creds = decrypt_credentials(cred.encrypted_credentials) or {}
+        creds = decrypt_credentials(encrypted) or {}
         token_sig = str(creds.get("access_token") or "")
         if not token_sig:
             return None
