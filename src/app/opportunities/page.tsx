@@ -1071,7 +1071,10 @@ export default function OpportunitiesPage() {
       const currentMarketInfo = getMarketHoursInfo();
       setMarketInfo(currentMarketInfo);
 
-      const res = await fetch('/api/opportunities');
+      const token = typeof window !== 'undefined' ? localStorage.getItem('ultrabot_token') : null;
+      const authHeaders: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+
+      const res = await fetch('/api/opportunities', { headers: authHeaders });
       if (res.ok) {
         const json = await res.json();
         const rawOpps = json?.data?.all || (Array.isArray(json?.data) ? json.data : null) || (Array.isArray(json) ? json : null);
@@ -1087,7 +1090,7 @@ export default function OpportunitiesPage() {
           // Engine-side invalidated/expired opportunities (real TTL expiries,
           // supersessions) — fetched from /api/opportunities/invalidated.
           try {
-            const invRes = await fetch('/api/opportunities/invalidated');
+            const invRes = await fetch('/api/opportunities/invalidated', { headers: authHeaders });
             if (invRes.ok) {
               const invJson = await invRes.json();
               const invList = Array.isArray(invJson) ? invJson : (Array.isArray(invJson?.data) ? invJson.data : []);
