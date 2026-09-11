@@ -425,6 +425,22 @@ class TestG15VolumeLiquidity:
         assert result.passed is False
         assert "below minimum" in result.message
 
+    async def test_pass_mean_reversion_lower_volume(self):
+        gate = G15VolumeLiquidity({"min_volume_ratio": 1.0, "mean_reversion_min_volume_ratio": 0.3})
+        signal = make_signal(strategy="MRF", volume_ratio=0.39)
+        ctx = make_context()
+        result = await gate.check(signal, ctx)
+        assert result.passed is True
+        assert "Volume confirmed" in result.message
+
+    async def test_pass_midday_natural_volume(self):
+        gate = G15VolumeLiquidity({"min_volume_ratio": 1.0, "midday_min_volume_ratio": 0.5})
+        signal = make_signal(strategy="ORB", volume_ratio=0.55)
+        ctx = make_context(time_of_day="12:35")
+        result = await gate.check(signal, ctx)
+        assert result.passed is True
+        assert "Volume confirmed" in result.message
+
 
 @pytest.mark.asyncio
 class TestG16MultiTimeframe:
