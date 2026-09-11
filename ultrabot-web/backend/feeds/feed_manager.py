@@ -24,9 +24,11 @@ class FeedManager:
         backup: Optional[BaseFeed] = None,
         watchdog_interval_seconds: float = 120.0,
         market_hours: Optional[MarketHours] = None,
+        aggregator: Optional[Any] = None,
     ):
         self.primary = primary or YahooHistoricalFeed()
         self.backup = backup
+        self.aggregator = aggregator
         self.market_hours = market_hours or MarketHours()
         self._using_backup = False
         self._primary_failure_count = 0
@@ -80,12 +82,19 @@ class FeedManager:
         timeframe: str = "5m",
         count: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Get candles, trying primary first, then backup."""
+        # Phase 1: Fast in-memory check to bypass REST rate limits completely
+        if self.aggregator is not None:
+            mem_candles = self.aggregator.get_candles(symbol, timeframe, count=count)
+            if mem_candles and len(mem_candles) >= min(count, 5):
+                return mem_candles
+
         if not self._using_backup:
             try:
                 candles = await self.primary.get_candles(symbol, timeframe, count)
                 # Only update last_successful_fetch_time when data is genuinely non-empty
                 if candles and len(candles) > 0:
+                    if self.aggregator is not None:
+                        self.aggregator.seed_candles(symbol, timeframe, candles)
                     self._primary_failure_count = 0
                     self._primary_healthy = True
                     self._last_successful_fetch_time = time.time()
@@ -103,7 +112,9 @@ class FeedManager:
         if self.backup is not None:
             try:
                 candles = await self.backup.get_candles(symbol, timeframe, count)
-                if candles:
+                if candles and len(candles) > 0:
+                    if self.aggregator is not None:
+                        self.aggregator.seed_candles(symbol, timeframe, candles)
                     return candles
             except Exception as e:
                 logger.warning("Backup feed candle error for %s: %s", symbol, e)

@@ -131,31 +131,53 @@ class PaperBroker(BaseBroker):
         margin_info = await self.get_margin()
         available = margin_info["available"]
 
-        if transaction_type.upper() == "BUY" and order_value > available:
-            # Check if this order is closing an existing opposing position
-            is_closing = (
-                symbol in self.positions
-                and self.positions[symbol].get("status") == "OPEN"
-                and self.positions[symbol].get("direction") == "SHORT"
+        # Check if this order is closing an existing opposing position
+        is_closing = (
+            symbol in self.positions
+            and self.positions[symbol].get("status") == "OPEN"
+            and (
+                (transaction_type.upper() == "BUY" and self.positions[symbol].get("direction") == "SHORT")
+                or (transaction_type.upper() == "SELL" and self.positions[symbol].get("direction") == "LONG")
             )
-            if not is_closing:
-                return {
-                    "success": False,
-                    "order_id": None,
-                    "message": f"Insufficient margin: need ₹{order_value:.2f}, available ₹{available:.2f}",
-                }
+        )
 
-        # Calculate fees for the entry leg
+        if not is_closing and order_value > available:
+            return {
+                "success": False,
+                "order_id": None,
+                "message": f"Insufficient margin: need ₹{order_value:.2f}, available ₹{available:.2f}",
+            }
+
+        # Calculate fees for the entry/exit leg
         entry_fees = self.fee_calculator.calculate_equity_intraday(
             buy_price=price, sell_price=price, quantity=quantity
         )
 
-        # Update capital balance on order fill
+        # Update capital balance on order fill (CP-07 fix: short sales lock margin, never credit cash)
         tx_type = transaction_type.upper()
-        if tx_type == "BUY":
+        if not is_closing:
+            # Both LONG and SHORT entry lock capital / margin
             self.capital -= (price * quantity + entry_fees["total"])
-        elif tx_type == "SELL":
-            self.capital += (price * quantity - entry_fees["total"])
+        else:
+            # Closing / reducing an opposing position
+            opp_pos = self.positions[symbol]
+            old_qty = opp_pos["quantity"]
+            close_qty = min(quantity, old_qty)
+            entry_price = opp_pos["entry_price"]
+            
+            if opp_pos.get("direction") == "LONG":
+                # Sold to close LONG: return invested capital + gross P&L - exit fees
+                gross_pnl = (price - entry_price) * close_qty
+                self.capital += (entry_price * close_qty + gross_pnl - entry_fees["total"])
+            else:
+                # Bought to close SHORT: return locked margin + gross P&L - exit fees
+                gross_pnl = (entry_price - price) * close_qty
+                self.capital += (entry_price * close_qty + gross_pnl - entry_fees["total"])
+
+            # If order quantity exceeds opposing position, remaining quantity opens new leg
+            excess_qty = quantity - close_qty
+            if excess_qty > 0:
+                self.capital -= (price * excess_qty)
 
         order_id = self._next_order_id()
         now = self._ist_now()
@@ -181,7 +203,6 @@ class PaperBroker(BaseBroker):
         }
         self.orders[order_id] = order
 
-        tx_type = transaction_type.upper()
         if tx_type in ("BUY", "SELL"):
             order_direction = "LONG" if tx_type == "BUY" else "SHORT"
             if symbol in self.positions and self.positions[symbol].get("status") == "OPEN":
@@ -206,6 +227,26 @@ class PaperBroker(BaseBroker):
                             pos["realized_pnl"] = round((price - pos["entry_price"]) * old_qty - entry_fees["total"], 2)
                         else:
                             pos["realized_pnl"] = round((pos["entry_price"] - price) * old_qty - entry_fees["total"], 2)
+                        
+                        # Position reversal if excess quantity
+                        excess_qty = quantity - old_qty
+                        if excess_qty > 0:
+                            self.positions[symbol] = {
+                                "id": f"pos-{order_id}",
+                                "symbol": symbol,
+                                "exchange": exchange,
+                                "direction": order_direction,
+                                "quantity": excess_qty,
+                                "entry_price": round(price, 2),
+                                "current_price": round(price, 2),
+                                "invested_amount": round(price * excess_qty, 2),
+                                "status": "OPEN",
+                                "entry_time": now,
+                                "product": product,
+                                "segment": segment,
+                                "fees_paid": 0.0,
+                                "unrealized_pnl": 0.0,
+                            }
                     else:
                         pos["quantity"] = old_qty - quantity
                         pos["invested_amount"] = round(pos["entry_price"] * pos["quantity"], 2)
@@ -426,13 +467,10 @@ class PaperBroker(BaseBroker):
                     "fees_paid": fees_paid,
                     "unrealized_pnl": 0.0,
                 }
-                # Mirror the original BUY leg's capital movement (SELL/SHORT
-                # opens credit capital at entry; account identically so the
-                # close leg's add-back stays consistent).
-                if direction == "LONG":
-                    self.capital -= (invested + fees_paid)
-                else:
-                    self.capital += (invested - fees_paid)
+                # Mirror the original order leg's capital movement: both LONG
+                # and SHORT entries lock capital/margin (CP-07 fix), keeping get_margin()
+                # identical to a no-restart session.
+                self.capital -= (invested + fees_paid)
                 restored += 1
             except Exception as row_exc:
                 logger.warning(

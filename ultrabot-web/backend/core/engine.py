@@ -38,6 +38,8 @@ from shadow.shadow_utils import (
     update_excursion,
 )
 from core.capital_resolver import resolve_total_capital
+from core.event_bus import EventBus, EventPriority
+from feeds.tick_bar_aggregator import TickBarAggregator
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -272,6 +274,15 @@ class UltraBotEngine:
         self._shadow_feature_snapshot_enabled: bool = bool(
             _risk_cfg_init.get("shadow_feature_snapshot_enabled", True)
         )
+
+        # Phase 1: Real-time streaming & event engine
+        self.event_bus: EventBus = EventBus()
+        self.aggregator: Optional[TickBarAggregator] = getattr(self.feed_manager, "aggregator", None)
+        if self.aggregator is None:
+            self.aggregator = TickBarAggregator()
+            if hasattr(self.feed_manager, "aggregator"):
+                self.feed_manager.aggregator = self.aggregator
+
     @asynccontextmanager
     async def _repo_context(self):
         """Context manager yielding repository and ensuring session cleanup."""
@@ -798,6 +809,13 @@ class UltraBotEngine:
                 "details": f"Session {self.session_id[:8]} started with {len(self.active_strategies)} active strategies ({self.current_regime} regime)",
             })
 
+            # Phase 1: Start EventBus and wire continuous tick monitoring
+            if hasattr(self, "event_bus") and self.event_bus:
+                self.event_bus.start()
+                self.event_bus.subscribe("tick.quote", self._handle_tick_position_monitor)
+            if hasattr(self, "aggregator") and self.aggregator:
+                self.aggregator.register_tick_listener(self._on_tick_update)
+
             # Start main loop as background task
             self._main_task = asyncio.create_task(self._main_loop())
             # v0.4.21 loop supervision: a main-loop task that DIES (unhandled
@@ -901,6 +919,13 @@ class UltraBotEngine:
                 except Exception as exc:
                     logger.warning("Error during feed disconnect: %s", exc)
                 self.feed = None
+
+            # Phase 1: Stop EventBus
+            if hasattr(self, "event_bus") and self.event_bus:
+                try:
+                    await self.event_bus.stop()
+                except Exception as exc:
+                    logger.warning("Error stopping event bus: %s", exc)
 
             # Close session
             if self.session_id:
@@ -4301,6 +4326,33 @@ class UltraBotEngine:
     # ------------------------------------------------------------------
     # Position Management
     # ------------------------------------------------------------------
+
+    def _on_tick_update(self, symbol: str, price: float, ts: float) -> None:
+        """Immediate synchronous tick listener from aggregator (Phase 1 fast path)."""
+        if not hasattr(self, "event_bus") or not self.event_bus or not self.event_bus._running or self.state != EngineState.RUNNING:
+            return
+        self.event_bus.publish_nowait(
+            "tick.quote",
+            {"symbol": symbol, "price": price, "timestamp": ts},
+            priority=EventPriority.HIGH,
+        )
+
+    async def _handle_tick_position_monitor(self, event_name: str, payload: Dict[str, Any]) -> None:
+        """High-priority tick evaluator for open positions (sub-millisecond SL/target exit)."""
+        symbol = payload.get("symbol")
+        price = payload.get("price")
+        if not symbol or not price or self.state != EngineState.RUNNING:
+            return
+        try:
+            async with self._repo_context() as repo:
+                if repo is None:
+                    return
+                positions = await repo.get_open_positions()
+                for pos in positions:
+                    if pos.symbol.upper() == symbol.upper():
+                        await self._manage_position(pos, repo=repo)
+        except Exception as e:
+            logger.debug("Error in tick position monitor for %s: %s", symbol, e)
 
     async def _manage_all_positions(self) -> None:
         """Manage all open positions: update prices, check SL/target/partial bookings."""

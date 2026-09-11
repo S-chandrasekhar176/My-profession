@@ -34,9 +34,10 @@ class FyersWebSocketFeed(BaseFeed):
     since that's what the SDK expects.
     """
 
-    def __init__(self, app_id: str, access_token: str):
+    def __init__(self, app_id: str, access_token: str, aggregator: Optional[Any] = None):
         self.app_id = app_id
         self.access_token = access_token
+        self.aggregator = aggregator
         self._combined_token = f"{app_id}:{access_token}" if app_id and access_token else access_token
         self._socket: Optional[data_ws.FyersDataSocket] = None
         self._connected = False
@@ -128,9 +129,11 @@ class FyersWebSocketFeed(BaseFeed):
         timeframe: str = "5m",
         count: int = 100,
     ) -> List[Dict[str, Any]]:
-        # The data websocket only streams live ticks, not historical
-        # candles. Historical OHLCV goes through FyersBroker.get_candles()
-        # (REST /data/history via the SDK), not this feed.
+        # If in-memory aggregator is attached, return synthesized candles from RAM (Zero REST)
+        if self.aggregator is not None:
+            candles = self.aggregator.get_candles(symbol, timeframe, count=count)
+            if candles:
+                return candles
         return []
 
     def is_connected(self) -> bool:
@@ -190,7 +193,21 @@ class FyersWebSocketFeed(BaseFeed):
             ltp = message.get("ltp")
             if fyers_symbol and ltp:
                 symbol = self._from_fyers_symbol(fyers_symbol)
-                self._ltp_data[symbol] = float(ltp)
-                self._last_update[symbol] = time.time()
+                price_flt = float(ltp)
+                now_ts = time.time()
+                self._ltp_data[symbol] = price_flt
+                self._last_update[symbol] = now_ts
+
+                # Forward tick to in-memory aggregator (Phase 1 zero-REST pipeline)
+                if self.aggregator is not None:
+                    vol = int(message.get("vol_traded_today", message.get("volume", 0)) or 0)
+                    ts = float(message.get("last_traded_time", message.get("timestamp", now_ts)) or now_ts)
+                    self.aggregator.on_tick(
+                        symbol=symbol,
+                        price=price_flt,
+                        volume=vol,
+                        timestamp=ts,
+                        cumulative_volume=True,
+                    )
         except Exception as exc:
             logger.debug("Failed to parse Fyers WS message: %s", exc)
