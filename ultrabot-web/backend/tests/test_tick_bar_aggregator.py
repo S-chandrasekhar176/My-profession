@@ -140,3 +140,62 @@ class TestTickBarAggregator:
         assert len(candles) == 3
         assert candles[0]["open"] == 500
 
+    def test_seed_candles_deduplication_and_update(self):
+        agg = TickBarAggregator()
+        initial = [
+            {"timestamp": "2026-09-11 09:15:00", "open": 500, "high": 510, "low": 490, "close": 505, "volume": 1000},
+            {"timestamp": "2026-09-11 09:20:00", "open": 505, "high": 515, "low": 500, "close": 510, "volume": 1200},
+        ]
+        agg.seed_candles("INFY", "5m", initial)
+        assert len(agg.get_candles("INFY", "5m", include_forming=False)) == 2
+
+        # Re-seed with updated bar for 09:20 and new bar for 09:25
+        updated = [
+            {"timestamp": "2026-09-11 09:20:00", "open": 505, "high": 518, "low": 500, "close": 515, "volume": 1500},
+            {"timestamp": "2026-09-11 09:25:00", "open": 515, "high": 520, "low": 512, "close": 518, "volume": 800},
+        ]
+        added = agg.seed_candles("INFY", "5m", updated)
+        candles = agg.get_candles("INFY", "5m", include_forming=False)
+        assert len(candles) == 3
+        # Ensure 09:20 was updated in-place (no duplicates)
+        assert candles[1]["timestamp"] == "2026-09-11 09:20:00"
+        assert candles[1]["high"] == 518.0
+        assert candles[1]["close"] == 515.0
+        assert candles[2]["timestamp"] == "2026-09-11 09:25:00"
+
+
+@pytest.mark.asyncio
+async def test_feed_manager_falls_back_when_memory_candles_are_stale():
+    from unittest.mock import AsyncMock, MagicMock
+    from datetime import datetime, timedelta
+    from feeds.feed_manager import FeedManager
+
+    mock_mkt_hours = MagicMock()
+    mock_mkt_hours.is_market_open.return_value = True
+
+    # 1 hour old candles in memory
+    old_time = (datetime.now() - timedelta(minutes=60)).strftime("%Y-%m-%d %H:%M:%S")
+    agg = TickBarAggregator()
+    agg.seed_candles("TCS", "5m", [
+        {"timestamp": old_time, "open": 3500, "high": 3510, "low": 3495, "close": 3505, "volume": 1000}
+        for _ in range(5)
+    ])
+
+    fresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fresh_candles = [
+        {"timestamp": fresh_time, "open": 3520, "high": 3530, "low": 3515, "close": 3525, "volume": 2000}
+    ]
+
+    mock_primary = MagicMock()
+    mock_primary.get_candles = AsyncMock(return_value=fresh_candles)
+
+    fm = FeedManager(primary=mock_primary, market_hours=mock_mkt_hours, aggregator=agg)
+
+    # When get_candles is called during open market hours, old in-memory candles (> 10m)
+    # must trigger primary.get_candles rather than returning stale memory bars
+    candles = await fm.get_candles("TCS", timeframe="5m", count=5)
+    assert mock_primary.get_candles.called
+    assert candles[-1]["timestamp"] == fresh_time
+    assert candles[-1]["close"] == 3525.0
+
+

@@ -304,20 +304,31 @@ class TickBarAggregator:
         with self._lock:
             if tf not in self.timeframes:
                 self.timeframes.append(tf)
+            if sym_upper not in self._bars:
+                self._bars[sym_upper] = {t: deque(maxlen=self.max_bars) for t in self.timeframes}
+            elif tf not in self._bars[sym_upper]:
+                self._bars[sym_upper][tf] = deque(maxlen=self.max_bars)
+
             dq = self._bars[sym_upper][tf]
+            bar_map: Dict[str, Dict[str, Any]] = {b["timestamp"]: b for b in dq}
             added = 0
             for c in candles:
                 if isinstance(c, dict) and "open" in c and "close" in c and "timestamp" in c:
-                    bar = {
-                        "timestamp": str(c["timestamp"]),
+                    ts_str = str(c["timestamp"])
+                    if ts_str not in bar_map:
+                        added += 1
+                    bar_map[ts_str] = {
+                        "timestamp": ts_str,
                         "open": round(float(c["open"]), 2),
                         "high": round(float(c.get("high", c["open"])), 2),
                         "low": round(float(c.get("low", c["open"])), 2),
                         "close": round(float(c["close"]), 2),
                         "volume": int(c.get("volume", 0) or 0),
                     }
-                    dq.append(bar)
-                    added += 1
+            sorted_bars = sorted(bar_map.values(), key=lambda b: b["timestamp"])
+            dq.clear()
+            for b in sorted_bars[-self.max_bars:]:
+                dq.append(b)
             return added
 
     def get_latest_price(self, symbol: str) -> float:

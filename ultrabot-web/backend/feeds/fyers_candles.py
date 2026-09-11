@@ -178,12 +178,13 @@ class FyersCandleFeed(BaseFeed):
         symbol: str,
         timeframe: str = "5m",
         count: int = 100,
+        force_refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         tf = (timeframe or "5m").lower()
         cache_key = f"{symbol}:{tf}:{count}"
         now = time.time()
         cached = self._cache.get(cache_key)
-        if cached and (now - cached["ts"]) < self._cache_ttl:
+        if not force_refresh and cached and (now - cached["ts"]) < self._cache_ttl:
             return [dict(c) for c in cached["candles"]]
 
         try:

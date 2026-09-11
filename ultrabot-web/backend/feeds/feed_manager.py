@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from core.market_hours import MarketHours, IST
 from feeds.base import BaseFeed
 from feeds.yahoo_historical import YahooHistoricalFeed
+from utils.market_utils import get_last_candle_age_minutes
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +82,39 @@ class FeedManager:
         symbol: str,
         timeframe: str = "5m",
         count: int = 100,
+        force_refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         # Phase 1: Fast in-memory check to bypass REST rate limits completely
-        if self.aggregator is not None:
+        if not force_refresh and self.aggregator is not None:
             mem_candles = self.aggregator.get_candles(symbol, timeframe, count=count)
             if mem_candles and len(mem_candles) >= min(count, 5):
-                return mem_candles
+                is_stale = False
+                try:
+                    if hasattr(self.market_hours, "is_market_open") and self.market_hours.is_market_open():
+                        age = get_last_candle_age_minutes(mem_candles)
+                        # A 5m candle takes 5m. If the newest bar is > 10m old during market hours,
+                        # live ticks are not updating the in-memory aggregator (e.g. running on REST feed).
+                        # Do not serve stale candles — fall through to REST fetch.
+                        max_allowed_age = 10.0 if timeframe in ("5m", "5min") else 20.0
+                        if age is not None and age > max_allowed_age:
+                            is_stale = True
+                            logger.debug(
+                                "In-memory candles for %s are stale (age=%.1fm > max=%.1fm). Falling back to feed fetch.",
+                                symbol, age, max_allowed_age,
+                            )
+                except Exception:
+                    is_stale = False
+
+                if not is_stale:
+                    return mem_candles
 
         if not self._using_backup:
             try:
-                candles = await self.primary.get_candles(symbol, timeframe, count)
+                try:
+                    candles = await self.primary.get_candles(symbol, timeframe, count, force_refresh=force_refresh)
+                except TypeError:
+                    candles = await self.primary.get_candles(symbol, timeframe, count)
+
                 # Only update last_successful_fetch_time when data is genuinely non-empty
                 if candles and len(candles) > 0:
                     if self.aggregator is not None:
@@ -114,7 +138,11 @@ class FeedManager:
 
         if self.backup is not None:
             try:
-                candles = await self.backup.get_candles(symbol, timeframe, count)
+                try:
+                    candles = await self.backup.get_candles(symbol, timeframe, count, force_refresh=force_refresh)
+                except TypeError:
+                    candles = await self.backup.get_candles(symbol, timeframe, count)
+
                 if candles and len(candles) > 0:
                     if self.aggregator is not None:
                         try:
