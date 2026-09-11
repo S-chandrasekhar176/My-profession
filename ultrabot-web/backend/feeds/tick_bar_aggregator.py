@@ -109,17 +109,18 @@ class TickBarAggregator:
         timeframes: Optional[List[str]] = None,
         max_bars: int = 300,
     ):
-        self.timeframes = [normalize_timeframe(tf) for tf in (timeframes or ["10s", "1m", "5m"])]
+        default_tfs = ["10s", "1m", "5m", "15m", "60m", "1d"]
+        self.timeframes = [normalize_timeframe(tf) for tf in (timeframes or default_tfs)]
         self.max_bars = max_bars
         self._lock = threading.Lock()
 
-        # symbol -> timeframe -> deque of completed bar dicts
+        # symbol -> timeframe -> deque of completed bar dicts (dynamically handles ANY timeframe)
         self._bars: Dict[str, Dict[str, deque]] = defaultdict(
-            lambda: {tf: deque(maxlen=self.max_bars) for tf in self.timeframes}
+            lambda: defaultdict(lambda: deque(maxlen=self.max_bars))
         )
-        # symbol -> timeframe -> FormingBar
+        # symbol -> timeframe -> FormingBar (dynamically handles ANY timeframe)
         self._forming: Dict[str, Dict[str, Optional[FormingBar]]] = defaultdict(
-            lambda: {tf: None for tf in self.timeframes}
+            lambda: defaultdict(lambda: None)
         )
         # symbol -> last known cumulative day volume
         self._last_day_volume: Dict[str, int] = {}
@@ -301,6 +302,8 @@ class TickBarAggregator:
         tf = normalize_timeframe(timeframe)
 
         with self._lock:
+            if tf not in self.timeframes:
+                self.timeframes.append(tf)
             dq = self._bars[sym_upper][tf]
             added = 0
             for c in candles:

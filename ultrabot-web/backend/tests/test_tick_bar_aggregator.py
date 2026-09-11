@@ -126,3 +126,17 @@ class TestTickBarAggregator:
         assert "open" in df.columns
         assert "close" in df.columns
         assert df["close"].iloc[0] == 20000.0
+
+    def test_dynamic_timeframe_seeding_no_keyerror(self):
+        agg = TickBarAggregator()  # default timeframes
+        # Seed 15m candles (must not throw KeyError '15m')
+        history = [
+            {"timestamp": f"2026-09-11 09:{i*15:02d}:00", "open": 500 + i, "high": 510, "low": 490, "close": 505, "volume": 5000}
+            for i in range(3)
+        ]
+        count = agg.seed_candles("SHRIRAMFIN", "15m", history)
+        assert count == 3
+        candles = agg.get_candles("SHRIRAMFIN", "15m", include_forming=False)
+        assert len(candles) == 3
+        assert candles[0]["open"] == 500
+

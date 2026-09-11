@@ -94,7 +94,10 @@ class FeedManager:
                 # Only update last_successful_fetch_time when data is genuinely non-empty
                 if candles and len(candles) > 0:
                     if self.aggregator is not None:
-                        self.aggregator.seed_candles(symbol, timeframe, candles)
+                        try:
+                            self.aggregator.seed_candles(symbol, timeframe, candles)
+                        except Exception as seed_err:
+                            logger.debug("Failed to seed aggregator for %s: %s", symbol, seed_err)
                     self._primary_failure_count = 0
                     self._primary_healthy = True
                     self._last_successful_fetch_time = time.time()
@@ -114,7 +117,10 @@ class FeedManager:
                 candles = await self.backup.get_candles(symbol, timeframe, count)
                 if candles and len(candles) > 0:
                     if self.aggregator is not None:
-                        self.aggregator.seed_candles(symbol, timeframe, candles)
+                        try:
+                            self.aggregator.seed_candles(symbol, timeframe, candles)
+                        except Exception as seed_err:
+                            logger.debug("Failed to seed aggregator from backup for %s: %s", symbol, seed_err)
                     return candles
             except Exception as e:
                 logger.warning("Backup feed candle error for %s: %s", symbol, e)
