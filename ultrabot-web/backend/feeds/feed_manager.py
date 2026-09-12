@@ -77,6 +77,28 @@ class FeedManager:
 
         return 0.0
 
+    @staticmethod
+    def _get_max_candle_age_minutes(timeframe: str) -> float:
+        """Dynamically scale freshness threshold by timeframe interval."""
+        tf = timeframe.lower()
+        if tf in ("1m", "1min"):
+            return 5.0
+        elif tf in ("3m", "3min"):
+            return 8.0
+        elif tf in ("5m", "5min"):
+            return 12.0
+        elif tf in ("10m", "10min"):
+            return 20.0
+        elif tf in ("15m", "15min"):
+            return 30.0
+        elif tf in ("30m", "30min"):
+            return 60.0
+        elif tf in ("60m", "1h", "60min"):
+            return 120.0
+        elif tf in ("1d", "d", "day"):
+            return 1440.0
+        return 30.0
+
     async def get_candles(
         self,
         symbol: str,
@@ -92,15 +114,14 @@ class FeedManager:
                 try:
                     if hasattr(self.market_hours, "is_market_open") and self.market_hours.is_market_open():
                         age = get_last_candle_age_minutes(mem_candles)
-                        # A 5m candle takes 5m. If the newest bar is > 10m old during market hours,
-                        # live ticks are not updating the in-memory aggregator (e.g. running on REST feed).
-                        # Do not serve stale candles — fall through to REST fetch.
-                        max_allowed_age = 10.0 if timeframe in ("5m", "5min") else 20.0
+                        # Dynamically scale allowed age by timeframe to avoid false-stale REST fallbacks
+                        # on higher timeframes (e.g. 60m, 1d).
+                        max_allowed_age = self._get_max_candle_age_minutes(timeframe)
                         if age is not None and age > max_allowed_age:
                             is_stale = True
                             logger.debug(
-                                "In-memory candles for %s are stale (age=%.1fm > max=%.1fm). Falling back to feed fetch.",
-                                symbol, age, max_allowed_age,
+                                "In-memory candles for %s are stale (age=%.1fm > max=%.1fm for %s). Falling back to feed fetch.",
+                                symbol, age, max_allowed_age, timeframe,
                             )
                 except Exception:
                     is_stale = False

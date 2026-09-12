@@ -18,7 +18,7 @@ class G15VolumeLiquidity:
         # Mean reversion strategies (MRF, VC) fade exhausted moves, where volume naturally
         # dries up at extreme bands. Requiring 1.0x breakout volume is anti-pattern for MR.
         self.mean_reversion_min_volume_ratio: float = float(
-            self.config.get("mean_reversion_min_volume_ratio", 0.3)
+            self.config.get("mean_reversion_min_volume_ratio", 0.5)
         )
         self.midday_min_volume_ratio: float = float(
             self.config.get("midday_min_volume_ratio", 0.5)
@@ -49,13 +49,14 @@ class G15VolumeLiquidity:
         if isinstance(signal, dict) and "min_volume_ratio" in signal:
             threshold = float(signal["min_volume_ratio"])
         elif strategy in ("MRF", "MEAN_REVERSION", "MEANREVERSIONFORCE", "VC"):
-            threshold = self.mean_reversion_min_volume_ratio
-        else:
             time_of_day = str(context.get("time_of_day") or "")
             if time_of_day and "11:30" <= time_of_day <= "13:30":
                 threshold = self.midday_min_volume_ratio
             else:
-                threshold = self.min_volume_ratio
+                threshold = self.mean_reversion_min_volume_ratio
+        else:
+            # Breakout and momentum strategies strictly require >= 1.0x baseline (no midday dilution)
+            threshold = self.min_volume_ratio
 
         if volume_ratio < threshold:
             return GateResult(

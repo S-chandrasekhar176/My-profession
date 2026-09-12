@@ -282,6 +282,8 @@ class UltraBotEngine:
             self.aggregator = TickBarAggregator()
             if hasattr(self.feed_manager, "aggregator"):
                 self.feed_manager.aggregator = self.aggregator
+        # In-memory position cache for microsecond tick monitoring (prevents per-tick DB queries)
+        self._active_position_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     @asynccontextmanager
     async def _repo_context(self):
@@ -528,6 +530,7 @@ class UltraBotEngine:
                         async with self._repo_context() as repo:
                             if repo is not None and hasattr(repo, "get_open_positions"):
                                 _open_rows = await repo.get_open_positions()
+                                self._rebuild_active_position_cache(_open_rows or [])
                                 _rows = [
                                     {
                                         "id": getattr(r, "id", None),
@@ -4189,7 +4192,7 @@ class UltraBotEngine:
             }
             position_extra.update(option_metadata)
 
-            await repo.create_position(
+            _new_pos = await repo.create_position(
                 trade_id=trade_id,
                 symbol=trade_symbol,
                 direction=trade_direction,
@@ -4209,6 +4212,8 @@ class UltraBotEngine:
                 session_id=self.session_id,
                 extra=position_extra,
             )
+            if _new_pos:
+                self._sync_position_to_cache(_new_pos)
 
             # v0.4.16 (user-testing feedback 2026-09-08): the DB signal row
             # stayed 'pending' after a successful fill — on the next engine
@@ -4337,27 +4342,151 @@ class UltraBotEngine:
             priority=EventPriority.HIGH,
         )
 
+    def _rebuild_active_position_cache(self, positions: List[Any]) -> None:
+        """Rebuild the in-memory active position cache from a list of Position objects."""
+        new_cache: Dict[str, List[Dict[str, Any]]] = {}
+        for pos in (positions or []):
+            sym = str(getattr(pos, "symbol", "") or "").upper()
+            if not sym:
+                continue
+            if sym not in new_cache:
+                new_cache[sym] = []
+            new_cache[sym].append({
+                "id": getattr(pos, "id", None),
+                "symbol": sym,
+                "direction": getattr(pos, "direction", "BUY"),
+                "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
+                "current_price": float(getattr(pos, "current_price", 0.0) or getattr(pos, "entry_price", 0.0) or 0.0),
+                "quantity": int(getattr(pos, "quantity", 0) or 0),
+                "stop_loss": float(getattr(pos, "stop_loss", 0.0) or getattr(pos, "sl_price", 0.0) or 0.0),
+                "target": float(getattr(pos, "target", 0.0) or getattr(pos, "target_price", 0.0) or 0.0),
+                "trailing_stop": float(getattr(pos, "trailing_stop", 0.0) or 0.0),
+                "status": "OPEN",
+            })
+        self._active_position_cache = new_cache
+
+    def _sync_position_to_cache(self, position: Any) -> None:
+        """Add or update an open position in the in-memory cache."""
+        sym = str(getattr(position, "symbol", "") or "").upper()
+        pos_id = getattr(position, "id", None)
+        if not sym or not pos_id:
+            return
+        if sym not in self._active_position_cache:
+            self._active_position_cache[sym] = []
+        for existing in self._active_position_cache[sym]:
+            if existing.get("id") == pos_id:
+                existing.update({
+                    "direction": getattr(position, "direction", existing.get("direction")),
+                    "entry_price": float(getattr(position, "entry_price", existing.get("entry_price", 0.0)) or 0.0),
+                    "current_price": float(getattr(position, "current_price", existing.get("current_price", 0.0)) or 0.0),
+                    "quantity": int(getattr(position, "quantity", existing.get("quantity", 0)) or 0),
+                    "stop_loss": float(getattr(position, "stop_loss", 0.0) or getattr(position, "sl_price", 0.0) or 0.0),
+                    "target": float(getattr(position, "target", 0.0) or getattr(position, "target_price", 0.0) or 0.0),
+                    "trailing_stop": float(getattr(position, "trailing_stop", 0.0) or 0.0),
+                })
+                return
+        self._active_position_cache[sym].append({
+            "id": pos_id,
+            "symbol": sym,
+            "direction": getattr(position, "direction", "BUY"),
+            "entry_price": float(getattr(position, "entry_price", 0.0) or 0.0),
+            "current_price": float(getattr(position, "current_price", 0.0) or getattr(position, "entry_price", 0.0) or 0.0),
+            "quantity": int(getattr(position, "quantity", 0) or 0),
+            "stop_loss": float(getattr(position, "stop_loss", 0.0) or getattr(position, "sl_price", 0.0) or 0.0),
+            "target": float(getattr(position, "target", 0.0) or getattr(position, "target_price", 0.0) or 0.0),
+            "trailing_stop": float(getattr(position, "trailing_stop", 0.0) or 0.0),
+            "status": "OPEN",
+        })
+
+    def _remove_position_from_cache(self, position_id: Any, symbol: Optional[str] = None) -> None:
+        """Remove a closed position from the in-memory cache."""
+        if symbol:
+            sym = str(symbol).upper()
+            if sym in self._active_position_cache:
+                self._active_position_cache[sym] = [
+                    p for p in self._active_position_cache[sym] if p.get("id") != position_id
+                ]
+                if not self._active_position_cache[sym]:
+                    del self._active_position_cache[sym]
+                return
+        for sym_key in list(self._active_position_cache.keys()):
+            self._active_position_cache[sym_key] = [
+                p for p in self._active_position_cache[sym_key] if p.get("id") != position_id
+            ]
+            if not self._active_position_cache[sym_key]:
+                del self._active_position_cache[sym_key]
+
     async def _handle_tick_position_monitor(self, event_name: str, payload: Dict[str, Any]) -> None:
-        """High-priority tick evaluator for open positions (sub-millisecond SL/target exit)."""
+        """High-priority tick evaluator for open positions (sub-millisecond SL/target exit).
+        
+        Evaluates pure in-memory cache in microseconds without touching DB.
+        Only when an actual SL or target breach is detected does it open a DB session to execute exit.
+        """
         symbol = payload.get("symbol")
         price = payload.get("price")
-        if not symbol or not price or self.state != EngineState.RUNNING:
+        if not symbol or price is None or self.state != EngineState.RUNNING:
             return
+
+        sym_upper = str(symbol).upper()
+        cached_positions = self._active_position_cache.get(sym_upper)
+        if not cached_positions:
+            return
+
+        try:
+            price_val = float(price)
+        except (ValueError, TypeError):
+            return
+
+        # Check if ANY cached position for this symbol has a potential breach
+        breach_detected = False
+        for pos_data in cached_positions:
+            sl = float(pos_data.get("stop_loss") or pos_data.get("sl_price") or 0.0)
+            target = float(pos_data.get("target") or pos_data.get("target_price") or 0.0)
+            direction = str(pos_data.get("direction", "BUY")).upper()
+            is_long = _is_long_direction(direction)
+
+            # Check Stop Loss breach
+            if sl > 0:
+                if is_long and price_val <= sl:
+                    breach_detected = True
+                    break
+                elif not is_long and price_val >= sl:
+                    breach_detected = True
+                    break
+
+            # Check Target breach
+            if target > 0:
+                if is_long and price_val >= target:
+                    breach_detected = True
+                    break
+                elif not is_long and price_val <= target:
+                    breach_detected = True
+                    break
+
+            # Update cached current price in RAM
+            pos_data["current_price"] = price_val
+
+        if not breach_detected:
+            # Price within normal bounds — pure RAM return, zero DB overhead!
+            return
+
+        # Price breached SL or Target: open DB context and execute exit
         try:
             async with self._repo_context() as repo:
                 if repo is None:
                     return
                 positions = await repo.get_open_positions()
                 for pos in positions:
-                    if pos.symbol.upper() == symbol.upper():
+                    if getattr(pos, "symbol", "").upper() == sym_upper:
                         await self._manage_position(pos, repo=repo)
         except Exception as e:
-            logger.debug("Error in tick position monitor for %s: %s", symbol, e)
+            logger.debug("Error in tick position monitor breach handler for %s: %s", symbol, e)
 
     async def _manage_all_positions(self) -> None:
         """Manage all open positions: update prices, check SL/target/partial bookings."""
         async with self._repo_context() as repo:
             positions = await repo.get_open_positions()
+            self._rebuild_active_position_cache(positions or [])
 
             for position in positions:
                 try:
@@ -5038,6 +5167,7 @@ class UltraBotEngine:
             position.direction, position.symbol, position.quantity,
             position.entry_price, exit_price, pnl_amount, net_pnl, close_reason,
         )
+        self._remove_position_from_cache(getattr(position, "id", None), getattr(position, "symbol", None))
 
     # ------------------------------------------------------------------
     # Market Context

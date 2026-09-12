@@ -48,11 +48,17 @@ class EventBus:
         self._worker_task = asyncio.create_task(self._dispatch_loop())
         logger.info("EventBus started with priority queue worker.")
 
-    async def stop(self) -> None:
-        """Gracefully drain and stop the event bus."""
+    async def stop(self, timeout: float = 3.0) -> None:
+        """Gracefully drain pending queue items and stop the event bus."""
         if not self._running:
             return
         self._running = False
+        try:
+            if not self._queue.empty():
+                await asyncio.wait_for(self._queue.join(), timeout=timeout)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.debug("EventBus stop drain ended or timed out: %s", e)
+
         if self._worker_task:
             self._worker_task.cancel()
             try:
@@ -141,9 +147,11 @@ class EventBus:
                     # Critical events are awaited directly to maintain deterministic ordering;
                     # normal/low events can be awaited or scheduled
                     if priority == EventPriority.HIGH:
-                        await handler(event_name, payload)
+                        await asyncio.wait_for(handler(event_name, payload), timeout=2.0)
                     else:
                         asyncio.create_task(self._safe_invoke(handler, event_name, payload))
+                except asyncio.TimeoutError:
+                    logger.warning("HIGH priority handler timed out (2.0s) for event %s: %s", event_name, handler)
                 except Exception as exc:
                     logger.error("Error executing handler for %s: %s", event_name, exc)
 

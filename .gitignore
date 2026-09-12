@@ -44,6 +44,8 @@ defaults.local.yaml
 *.pem
 *.tar
 *.zip
+*.pdf
+reports/
 download/
 upload/
 
