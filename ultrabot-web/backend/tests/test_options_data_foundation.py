@@ -307,3 +307,97 @@ async def test_option_recorder_single_poll(async_session):
     assert result["pcr"] == 1.1
     assert result["greeks_verification"]["valid"] is True
     assert result["snapshot_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_recorder_dynamic_broker_getter(async_session):
+    """Verify OptionChainRecorder resolves broker dynamically via broker_getter."""
+    mock_broker = AsyncMock()
+    mock_broker.get_option_chain.return_value = {
+        "s": "ok",
+        "data": {
+            "optionsChain": [
+                {
+                    "symbol": "NSE:NIFTY26SEP24500CE",
+                    "strike_price": 24500.0,
+                    "option_type": "CE",
+                    "ltp": 250.0,
+                    "oi": 10000,
+                    "spot_price": 24500.0,
+                    "delta": 0.50,
+                    "gamma": 0.0008,
+                    "theta": -12.0,
+                    "vega": 18.0,
+                    "iv": 0.15,
+                    "expiry": 1790409600,
+                }
+            ],
+            "expiryData": [{"expiry": 1790409600, "date": "25-Sep-2026"}],
+        },
+    }
+
+    repo = Repository(async_session)
+    recorder = OptionChainRecorder(
+        broker=None,
+        broker_getter=lambda: mock_broker,
+        repo_getter=lambda: repo,
+        symbols=["NIFTY"],
+    )
+
+    resolved = await recorder._resolve_broker()
+    assert resolved is mock_broker
+
+    result = await recorder.poll_and_record_once("NIFTY")
+    assert result["status"] == "success"
+    assert result["atm_strike"] == 24500.0
+
+
+@pytest.mark.asyncio
+async def test_options_api_endpoints(async_session):
+    """Verify options routes: snapshots, verify-greeks, and theta-budget."""
+    from api.routes.options import (
+        get_option_snapshots,
+        verify_greeks_endpoint,
+        check_theta_budget_endpoint,
+    )
+
+    repo = Repository(async_session)
+    # Seed a snapshot
+    snap = await repo.create_option_snapshot(
+        underlying_symbol="NIFTY",
+        spot_price=24500.0,
+        expiry="25-Sep-2026",
+        atm_strike=24500.0,
+        chain_data=[{"strike": 24500.0, "option_type": "CE", "ltp": 250.0}],
+    )
+    assert snap.id is not None
+
+    # 1. Snapshots API
+    res = await get_option_snapshots(symbol="NIFTY", limit=10, repo=repo, _user={})
+    assert res["symbol"] == "NIFTY"
+    assert res["count"] >= 1
+    assert res["snapshots"][0]["spot_price"] == 24500.0
+
+    # 2. Greeks Verification API
+    greeks_res = await verify_greeks_endpoint({
+        "spot_price": 24500.0,
+        "strike": 24500.0,
+        "tte_years": 0.02,
+        "iv": 0.15,
+        "option_type": "CE",
+        "broker_greeks": {"delta": 0.53, "gamma": 0.00076, "theta": -16.5, "vega": 13.5},
+        "tolerance": 0.25,
+    }, _user={})
+    assert "theoretical_greeks" in greeks_res
+    assert greeks_res["verification"]["valid"] is True
+
+    # 3. Theta Budget API
+    theta_res = await check_theta_budget_endpoint({
+        "expected_move_points": 100.0,
+        "delta": 0.55,
+        "daily_theta": 12.0,
+        "round_trip_cost_per_share": 1.5,
+    }, _user={})
+    assert theta_res["passed"] is True
+    assert theta_res["directional_gain"] == 55.0
+

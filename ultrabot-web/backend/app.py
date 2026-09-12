@@ -59,6 +59,7 @@ from api.routes import (
     scanner,
     candles,
     analytics,
+    options,
 )
 from api.websocket import ws_manager, router as ws_router
 
@@ -326,7 +327,49 @@ async def lifespan(app: FastAPI):
             notif_config=notif_config,
         )
         interactive_tg.start()
-        app.state.telegram_interactive = interactive_tg
+    # -- Phase 2: F&O Option Chain Recorder ----------------------------
+    try:
+        from options.option_recorder import OptionChainRecorder
+
+        async def _resolve_fyers_broker_dynamic():
+            if fyers_feed is not None and getattr(fyers_feed, "_broker", None):
+                return fyers_feed._broker
+            try:
+                getter = repo_getter()
+                repo = await getter if asyncio.iscoroutine(getter) else getter
+                try:
+                    cred = await repo.get_broker_credentials("fyers")
+                    if cred and getattr(cred, "encrypted_credentials", None):
+                        from utils.encryption import decrypt_credentials
+                        from brokers.fyers import FyersBroker
+                        creds = decrypt_credentials(cred.encrypted_credentials) or {}
+                        app_id = str(creds.get("app_id") or creds.get("client_id") or "")
+                        access_token = str(creds.get("access_token") or "")
+                        if app_id and access_token:
+                            return FyersBroker(app_id=app_id, access_token=access_token)
+                finally:
+                    if hasattr(repo, "close"):
+                        res = repo.close()
+                        if asyncio.iscoroutine(res):
+                            await res
+            except Exception as b_err:
+                logger.debug("OptionChainRecorder dynamic broker resolution: %s", b_err)
+            return None
+
+        option_recorder = OptionChainRecorder(
+            broker=getattr(fyers_feed, "_broker", None) if fyers_feed else None,
+            broker_getter=_resolve_fyers_broker_dynamic,
+            repo_getter=repo_getter,
+            symbols=["NIFTY", "BANKNIFTY"],
+            poll_interval_fast=5.0,
+            poll_interval_full=60.0,
+            market_hours=market_hours,
+        )
+        option_recorder.start()
+        app.state.option_recorder = option_recorder
+        logger.info("OptionChainRecorder started: active for NIFTY/BANKNIFTY chain ingestion")
+    except Exception as rec_exc:
+        logger.warning("OptionChainRecorder failed to start (non-fatal): %s", rec_exc)
 
     logger.info("UltraBot Web started")
     logger.info("Market status: %s", market_hours.get_market_status())
@@ -343,6 +386,11 @@ async def lifespan(app: FastAPI):
         app.state.db_backup_task.cancel()
     if hasattr(app.state, "db_backup_job"):
         app.state.db_backup_job.stop()
+    if hasattr(app.state, "option_recorder") and app.state.option_recorder:
+        try:
+            await app.state.option_recorder.stop()
+        except Exception as opt_stop_err:
+            logger.debug("Error stopping OptionChainRecorder: %s", opt_stop_err)
     if hasattr(app.state, "telegram_interactive"):
         await app.state.telegram_interactive.stop()
     if eng.state.value != "stopped":
@@ -385,6 +433,7 @@ app.include_router(settings_api.router)
 app.include_router(scanner.router)
 app.include_router(candles.router)
 app.include_router(analytics.router)
+app.include_router(options.router)
 app.include_router(ws_router)
 
 

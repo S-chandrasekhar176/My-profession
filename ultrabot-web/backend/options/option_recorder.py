@@ -23,7 +23,8 @@ class OptionChainRecorder:
 
     def __init__(
         self,
-        broker: Any,
+        broker: Any = None,
+        broker_getter: Optional[Callable[[], Any]] = None,
         repo_getter: Optional[Callable[[], Any]] = None,
         symbols: Optional[List[str]] = None,
         poll_interval_fast: float = 5.0,   # ATM+-3 tradable strikes interval (seconds)
@@ -31,6 +32,7 @@ class OptionChainRecorder:
         market_hours: Optional[MarketHours] = None,
     ):
         self.broker = broker
+        self.broker_getter = broker_getter
         self._repo_getter = repo_getter
         self.symbols = symbols or ["NIFTY", "BANKNIFTY"]
         self.poll_interval_fast = poll_interval_fast
@@ -44,6 +46,21 @@ class OptionChainRecorder:
         self._fast_task: Optional[asyncio.Task] = None
         self._full_task: Optional[asyncio.Task] = None
         self._last_full_poll: Dict[str, float] = {}
+
+    async def _resolve_broker(self) -> Any:
+        """Resolve current broker instance either from static attribute or dynamic getter."""
+        if self.broker is not None:
+            return self.broker
+        if self.broker_getter is not None:
+            try:
+                res = self.broker_getter()
+                broker = await res if asyncio.iscoroutine(res) else res
+                if broker is not None:
+                    self.fetcher.broker = broker
+                    return broker
+            except Exception as exc:
+                logger.debug("OptionChainRecorder broker_getter error: %s", exc)
+        return getattr(self.fetcher, "broker", None)
 
     def start(self) -> None:
         """Start the background recording workers."""
@@ -72,6 +89,10 @@ class OptionChainRecorder:
     async def poll_and_record_once(self, symbol: str, full_chain: bool = False) -> Dict[str, Any]:
         """Fetch, verify Greeks, and persist a single option chain snapshot."""
         try:
+            broker = await self._resolve_broker()
+            if broker is None:
+                return {"status": "no_broker", "symbol": symbol, "message": "No active broker available"}
+
             strike_count = 25 if full_chain else 8
             parsed_chain = await self.fetcher.fetch_option_chain(
                 symbol=symbol,
