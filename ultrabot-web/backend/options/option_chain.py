@@ -33,6 +33,8 @@ class OptionChainFetcher:
         symbol: str,
         expiry_date: Optional[str] = None,
         strikecount: int = 12,
+        strike_count: Optional[int] = None,
+        greeks: int = 1,
         min_days_to_expiry: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Fetch option chain for a given underlying symbol and resolve optimal expiry.
@@ -41,6 +43,8 @@ class OptionChainFetcher:
             symbol: Underlying symbol (e.g. 'NIFTY', 'BANKNIFTY', 'RELIANCE').
             expiry_date: Optional specific expiry date timestamp or string.
             strikecount: Number of strikes above/below ATM to fetch.
+            strike_count: Alias for strikecount.
+            greeks: Set to 1 to request Greeks from broker (delta, gamma, theta, vega, iv).
             min_days_to_expiry: Override days before expiry to trigger rollover.
 
         Returns:
@@ -50,11 +54,13 @@ class OptionChainFetcher:
             logger.warning("No broker with get_option_chain configured on OptionChainFetcher")
             return self._empty_chain(symbol, expiry_date or "")
 
+        count = strike_count if strike_count is not None else strikecount
         try:
             raw_data = await self.broker.get_option_chain(
                 symbol=symbol,
-                strikecount=strikecount,
+                strikecount=count,
                 timestamp=expiry_date or "",
+                greeks=greeks,
             )
             return self.parse_fyers_chain(
                 raw_data=raw_data,
@@ -112,6 +118,11 @@ class OptionChainFetcher:
             ask = float(item.get("ask", 0.0) or 0.0)
             iv = float(item.get("iv", 0.0) or 0.0)
             delta = float(item.get("delta", 0.0) or 0.0)
+            gamma = float(item.get("gamma", 0.0) or 0.0)
+            theta = float(item.get("theta", 0.0) or 0.0)
+            vega = float(item.get("vega", 0.0) or 0.0)
+            prev_oi = int(item.get("prev_oi", 0) or 0)
+            oi_change = (oi - prev_oi) if prev_oi > 0 else int(item.get("oi_change", 0) or 0)
 
             # Detect spot price from underlying or ATM option metadata
             if spot_price <= 0 and item.get("spot_price"):
@@ -127,11 +138,15 @@ class OptionChainFetcher:
                 "oi": oi,
                 "openInterest": oi,
                 "open_interest": oi,
+                "oi_change": oi_change,
                 "volume": vol,
                 "bid": bid,
                 "ask": ask,
                 "iv": iv,
                 "delta": delta,
+                "gamma": gamma,
+                "theta": theta,
+                "vega": vega,
                 "expiry": active_expiry_str or str(item_expiry),
                 "expiry_epoch": item_expiry,
             }
@@ -141,12 +156,18 @@ class OptionChainFetcher:
             elif opt_type == "PE":
                 puts.append(option_dict)
 
-        # Compute ATM strike
+        # Compute ATM strike and Market Structure metrics
         all_strikes = sorted(set([c["strike"] for c in calls] + [p["strike"] for p in puts]))
         if spot_price <= 0 and all_strikes:
             spot_price = all_strikes[len(all_strikes) // 2]
 
         atm_strike = self._find_atm(all_strikes, spot_price)
+
+        # Calculate Total OI, PCR, and Max Pain
+        total_ce_oi = sum(c["oi"] for c in calls)
+        total_pe_oi = sum(p["oi"] for p in puts)
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 1.0
+        max_pain = self._calculate_max_pain(all_strikes, calls, puts) if all_strikes else atm_strike
 
         return {
             "symbol": symbol,
@@ -155,6 +176,10 @@ class OptionChainFetcher:
             "rolled_over": rolled_over,
             "spot_price": spot_price,
             "atm_strike": atm_strike,
+            "max_pain": max_pain,
+            "total_ce_oi": total_ce_oi,
+            "total_pe_oi": total_pe_oi,
+            "pcr": pcr,
             "calls": calls,
             "puts": puts,
             "expiries": expiry_list,
@@ -223,6 +248,35 @@ class OptionChainFetcher:
         if not strikes:
             return round(spot, 0)
         return min(strikes, key=lambda s: abs(s - spot))
+
+    @staticmethod
+    def _calculate_max_pain(
+        strikes: List[float],
+        calls: List[Dict[str, Any]],
+        puts: List[Dict[str, Any]],
+    ) -> float:
+        """Calculate Max Pain strike (strike where option buyers lose maximum money / sellers gain most)."""
+        if not strikes:
+            return 0.0
+
+        call_oi_map = {c["strike"]: c.get("oi", 0) for c in calls}
+        put_oi_map = {p["strike"]: p.get("oi", 0) for p in puts}
+
+        min_loss = float("inf")
+        max_pain_strike = strikes[0]
+
+        for target_k in strikes:
+            # Loss on calls: call writer loses if price finishes above call strike
+            call_loss = sum(max(0.0, target_k - k) * oi for k, oi in call_oi_map.items())
+            # Loss on puts: put writer loses if price finishes below put strike
+            put_loss = sum(max(0.0, k - target_k) * oi for k, oi in put_oi_map.items())
+            total_loss = call_loss + put_loss
+
+            if total_loss < min_loss:
+                min_loss = total_loss
+                max_pain_strike = target_k
+
+        return max_pain_strike
 
     @staticmethod
     def _empty_chain(symbol: str, expiry: str) -> Dict[str, Any]:

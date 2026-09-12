@@ -268,3 +268,86 @@ class GreeksCalculator:
             "vega": self.calculate_vega(S, K, T, sigma),
             "theoretical_price": round(self._theoretical_price(S, K, T, sigma, option_type), 2),
         }
+
+    def verify_greeks(
+        self,
+        broker_greeks: dict,
+        theoretical_greeks: dict,
+        tolerance: float = 0.20,
+    ) -> dict:
+        """Verify broker-provided Greeks against analytical Black-Scholes benchmark."""
+        divergences = {}
+        valid = True
+        for greek in ("delta", "gamma", "theta", "vega"):
+            b_val = float(broker_greeks.get(greek, 0.0) or 0.0)
+            t_val = float(theoretical_greeks.get(greek, 0.0) or 0.0)
+            diff = abs(b_val - t_val)
+            denom = max(abs(t_val), 0.01)
+            rel_err = diff / denom
+            divergences[greek] = {
+                "broker": b_val,
+                "theoretical": t_val,
+                "diff": round(diff, 4),
+                "rel_error": round(rel_err, 4),
+            }
+            if rel_err > tolerance and diff > 0.05:
+                valid = False
+
+        return {
+            "valid": valid,
+            "divergence": divergences,
+            "message": "Greeks verified within tolerance" if valid else f"Divergence detected in {list(divergences.keys())}",
+        }
+
+    def simulate_pnl_move(
+        self,
+        S: float,
+        K: float,
+        T: float,
+        sigma: float,
+        spot_move_points: float,
+        days_held: float = 0.25,
+        iv_shift_pct: float = 0.0,
+        option_type: str = "CE",
+    ) -> dict:
+        """Simulate expected option P&L under spot move and time decay."""
+        t_held_years = max(days_held / self.days_per_year, 0.0)
+        t_remaining = max(T - t_held_years, _EPS)
+        new_s = S + spot_move_points
+        new_sigma = max(sigma + (iv_shift_pct / 100.0), 0.01)
+
+        p_entry = self._theoretical_price(S, K, T, sigma, option_type)
+        p_exit = self._theoretical_price(new_s, K, t_remaining, new_sigma, option_type)
+        delta_pnl = p_exit - p_entry
+
+        return {
+            "entry_price": round(p_entry, 2),
+            "exit_price": round(p_exit, 2),
+            "expected_pnl_per_share": round(delta_pnl, 2),
+            "expected_pnl_pct": round((delta_pnl / p_entry) * 100.0, 2) if p_entry > 0 else 0.0,
+            "new_spot": round(new_s, 2),
+            "new_iv": round(new_sigma, 4),
+        }
+
+    def check_theta_budget(
+        self,
+        expected_move_points: float,
+        delta: float,
+        daily_theta: float,
+        round_trip_cost_per_share: float,
+        holding_fraction_of_day: float = 0.5,
+    ) -> dict:
+        """Theta-Budget Gate: Verify expected directional gain covers time decay and costs."""
+        directional_gain = abs(expected_move_points) * abs(delta)
+        expected_theta_loss = abs(daily_theta) * holding_fraction_of_day
+        net_edge = directional_gain - expected_theta_loss - round_trip_cost_per_share
+        passed = net_edge > 0 and directional_gain >= (expected_theta_loss + round_trip_cost_per_share) * 1.5
+
+        return {
+            "passed": passed,
+            "directional_gain": round(directional_gain, 2),
+            "expected_theta_loss": round(expected_theta_loss, 2),
+            "round_trip_cost": round(round_trip_cost_per_share, 2),
+            "net_edge": round(net_edge, 2),
+            "coverage_ratio": round(directional_gain / max(expected_theta_loss + round_trip_cost_per_share, 0.01), 2),
+        }

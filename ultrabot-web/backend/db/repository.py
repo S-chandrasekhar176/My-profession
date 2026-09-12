@@ -1515,3 +1515,66 @@ class Repository:
             "rows_with_session": with_session,
             "by_kind": by_kind,
         }
+
+    # ------------------------------------------------------------------
+    # Option Snapshots (Phase 2)
+    # ------------------------------------------------------------------
+
+    async def create_option_snapshot(
+        self,
+        underlying_symbol: str,
+        spot_price: float,
+        expiry: str,
+        atm_strike: float,
+        pcr: float = 1.0,
+        max_pain: Optional[float] = None,
+        total_ce_oi: int = 0,
+        total_pe_oi: int = 0,
+        tier: str = "tradable",
+        chain_data: Optional[List[Dict[str, Any]]] = None,
+        timestamp: Optional[str] = None,
+        expiry_epoch: Optional[int] = None,
+    ):
+        """Persist an option chain snapshot to database."""
+        from db.migrations import OptionSnapshot
+        import json
+
+        now_str = timestamp or datetime.now(IST).isoformat()
+        chain_json = json.dumps(chain_data or [])
+
+        snapshot = OptionSnapshot(
+            timestamp=now_str,
+            underlying_symbol=underlying_symbol.upper(),
+            spot_price=float(spot_price),
+            expiry=str(expiry),
+            expiry_epoch=expiry_epoch,
+            atm_strike=float(atm_strike),
+            max_pain=float(max_pain) if max_pain is not None else None,
+            pcr=float(pcr),
+            total_ce_oi=int(total_ce_oi),
+            total_pe_oi=int(total_pe_oi),
+            tier=str(tier),
+            chain_json=chain_json,
+        )
+        self.session.add(snapshot)
+        await self.session.commit()
+        await self.session.refresh(snapshot)
+        return snapshot
+
+    async def get_latest_option_snapshots(
+        self,
+        underlying_symbol: str,
+        limit: int = 50,
+    ):
+        """Fetch the most recent option snapshots for an underlying symbol."""
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select
+
+        stmt = (
+            select(OptionSnapshot)
+            .where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
+            .order_by(OptionSnapshot.timestamp.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

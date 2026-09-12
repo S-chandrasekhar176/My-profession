@@ -392,6 +392,28 @@ class ShadowOutcome(Base):
     features_schema_version: Mapped[str] = mapped_column(Text, nullable=True)
 
 
+# ──────────────────────────────────────────────
+# 12. option_snapshots (Phase 2: F&O Data Foundation)
+# ──────────────────────────────────────────────
+class OptionSnapshot(Base):
+    __tablename__ = "option_snapshots"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=_generate_uuid)
+    timestamp: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    underlying_symbol: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    spot_price: Mapped[float] = mapped_column(Float, nullable=False)
+    expiry: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    expiry_epoch: Mapped[int] = mapped_column(Integer, nullable=True)
+    atm_strike: Mapped[float] = mapped_column(Float, nullable=False)
+    max_pain: Mapped[float] = mapped_column(Float, nullable=True)
+    pcr: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    total_ce_oi: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_pe_oi: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tier: Mapped[str] = mapped_column(Text, nullable=False, default="tradable")  # "tradable" (ATM+-3) or "full"
+    chain_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON list of parsed strikes
+    created_at: Mapped[str] = mapped_column(Text, nullable=False, default=lambda: _ist_now().isoformat())
+
+
 # v0.4.12 — idempotent column-add for existing shadow_outcomes tables.
 # create_all only creates MISSING tables; it never alters existing ones, so
 # a live v0.4.11 database needs explicit ALTER TABLE ADD COLUMN. Adding

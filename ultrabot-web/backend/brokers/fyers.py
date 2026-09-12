@@ -349,9 +349,11 @@ class FyersBroker(BaseBroker):
         symbol: str,
         exchange: str = "NSE",
         strike_count: int = 10,
+        strikecount: Optional[int] = None,
         timestamp: str = "",
+        greeks: int = 1,
     ) -> Dict[str, Any]:
-        """Fetch option chain from Fyers API v3."""
+        """Fetch option chain from Fyers API v3 with broker-calculated Greeks."""
         try:
             client = self._get_client()
             sym_upper = symbol.upper().replace(" ", "").replace("_", "")
@@ -361,16 +363,22 @@ class FyersBroker(BaseBroker):
                 fyers_symbol = "NSE:NIFTYBANK-INDEX"
             elif sym_upper in ("FINNIFTY", "NIFTYFINSERVICE"):
                 fyers_symbol = "NSE:FINNIFTY-INDEX"
+            elif sym_upper in ("MIDCPNIFTY", "NIFTYMIDCAP"):
+                fyers_symbol = "NSE:MIDCPNIFTY-INDEX"
             elif ":" in symbol:
                 fyers_symbol = symbol
             else:
                 fyers_symbol = f"{exchange}:{symbol}-EQ" if "-EQ" not in symbol else symbol
 
+            effective_strikes = strikecount if strikecount is not None else strike_count
             payload = {
                 "symbol": fyers_symbol,
-                "strikecount": strike_count,
+                "strikecount": effective_strikes,
                 "timestamp": timestamp,
             }
+            if greeks:
+                payload["greeks"] = int(greeks)
+
             data = await self._call(_data_limiter, client.optionchain, payload)
             if isinstance(data, dict) and data.get("s") == "ok":
                 return data
