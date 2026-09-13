@@ -267,10 +267,10 @@ async def test_option_recorder_single_poll(async_session):
                     "ltp": 250.0,
                     "oi": 10000,
                     "spot_price": 24500.0,
-                    "delta": 0.50,
-                    "gamma": 0.0008,
-                    "theta": -12.0,
-                    "vega": 18.0,
+                    "delta": 0.56,
+                    "gamma": 0.0006,
+                    "theta": -10.6,
+                    "vega": 18.3,
                     "iv": 0.14,
                     "expiry": 1790409600,
                 },
@@ -281,10 +281,10 @@ async def test_option_recorder_single_poll(async_session):
                     "ltp": 250.0,
                     "oi": 11000,
                     "spot_price": 24500.0,
-                    "delta": -0.50,
-                    "gamma": 0.0008,
-                    "theta": -12.0,
-                    "vega": 18.0,
+                    "delta": -0.44,
+                    "gamma": 0.0006,
+                    "theta": -17.3,
+                    "vega": 18.3,
                     "iv": 0.14,
                     "expiry": 1790409600,
                 },
@@ -400,4 +400,108 @@ async def test_options_api_endpoints(async_session):
     }, _user={})
     assert theta_res["passed"] is True
     assert theta_res["directional_gain"] == 55.0
+
+
+def test_iv_rank_and_percentile_calculation():
+    """Verify IV rank and percentile calculation formulas."""
+    calc = GreeksCalculator()
+    # Min=0.10, Max=0.30, Current=0.20 -> 50%
+    ivr = calc.compute_iv_rank(current_iv=0.20, min_iv=0.10, max_iv=0.30)
+    assert ivr == 50.0
+
+    # Current=0.35 (> max) -> clamped to 100%
+    assert calc.compute_iv_rank(current_iv=0.35, min_iv=0.10, max_iv=0.30) == 100.0
+
+    # Historical: [0.12, 0.14, 0.16, 0.18, 0.22]
+    # Current = 0.17 -> 3 values below out of 5 -> 60%
+    ivp = calc.compute_iv_percentile(current_iv=0.17, historical_ivs=[0.12, 0.14, 0.16, 0.18, 0.22])
+    assert ivp == 60.0
+
+
+@pytest.mark.asyncio
+async def test_repository_iv_rank_and_pruning(async_session):
+    """Verify repository IV rank/percentile resolution and snapshot pruning."""
+    repo = Repository(async_session)
+
+    # Seed 3 snapshots with different ATM IVs
+    for i, iv_val in enumerate([0.12, 0.18, 0.24]):
+        await repo.create_option_snapshot(
+            underlying_symbol="NIFTY",
+            spot_price=24500.0,
+            expiry="25-Sep-2026",
+            atm_strike=24500.0,
+            chain_data=[{"strike": 24500.0, "option_type": "CE", "iv": iv_val}],
+        )
+
+    res = await repo.get_iv_rank_and_percentile("NIFTY", current_iv=0.18, lookback_days=90)
+    assert res["symbol"] == "NIFTY"
+    assert res["min_iv"] == 0.12
+    assert res["max_iv"] == 0.24
+    assert res["iv_rank"] == 50.0
+    assert res["samples_count"] >= 3
+
+    # Prune snapshots older than 1 day (should not delete fresh ones from today)
+    deleted = await repo.prune_option_snapshots(keep_days=1)
+    assert deleted == 0
+
+
+@pytest.mark.asyncio
+async def test_recorder_health_and_session_cleanup(async_session):
+    """Verify OptionChainRecorder get_health() and defensive session closing."""
+    mock_broker = AsyncMock()
+    mock_broker.get_option_chain.return_value = {
+        "s": "ok",
+        "data": {
+            "optionsChain": [
+                {
+                    "symbol": "NSE:NIFTY26SEP24500CE",
+                    "strike_price": 24500.0,
+                    "option_type": "CE",
+                    "ltp": 250.0,
+                    "oi": 10000,
+                    "spot_price": 24500.0,
+                    "delta": 0.53,
+                    "gamma": 0.00076,
+                    "theta": -16.5,
+                    "vega": 13.5,
+                    "iv": 0.15,
+                    "expiry": 1790409600,
+                },
+                {
+                    "symbol": "NSE:NIFTY26SEP24500PE",
+                    "strike_price": 24500.0,
+                    "option_type": "PE",
+                    "ltp": 250.0,
+                    "oi": 11000,
+                    "spot_price": 24500.0,
+                    "delta": -0.47,
+                    "gamma": 0.00076,
+                    "theta": -15.5,
+                    "vega": 13.5,
+                    "iv": 0.15,
+                    "expiry": 1790409600,
+                },
+            ],
+            "expiryData": [{"expiry": 1790409600, "date": "25-Sep-2026"}],
+        },
+    }
+
+    mock_repo = AsyncMock()
+    recorder = OptionChainRecorder(
+        broker=mock_broker,
+        repo_getter=lambda: mock_repo,
+        symbols=["NIFTY"],
+    )
+
+    result = await recorder.poll_and_record_once("NIFTY")
+    assert result["status"] == "success"
+    # Verify defensive close called
+    assert mock_repo.close.called is True
+
+    health = recorder.get_health()
+    assert health["polls_count"] == 1
+    assert health["rate_limit_hits_429"] == 0
+    assert health["last_poll_seconds_ago"] is not None
+    assert "NIFTY" in health["last_verification"]
+
 

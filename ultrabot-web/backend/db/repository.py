@@ -1578,3 +1578,94 @@ class Repository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_historical_atm_ivs(
+        self,
+        underlying_symbol: str,
+        lookback_days: int = 90,
+    ) -> List[float]:
+        """Fetch historical ATM IV values from recorded snapshots."""
+        import json
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select
+
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(days=lookback_days)).isoformat()
+        stmt = (
+            select(OptionSnapshot)
+            .where(
+                OptionSnapshot.underlying_symbol == underlying_symbol.upper(),
+                OptionSnapshot.timestamp >= cutoff,
+            )
+            .order_by(OptionSnapshot.timestamp.asc())
+        )
+        result = await self.session.execute(stmt)
+        snapshots = result.scalars().all()
+        ivs = []
+        for s in snapshots:
+            try:
+                chain = json.loads(s.chain_json) if s.chain_json else []
+                atm_call = next((c for c in chain if c.get("strike") == s.atm_strike and c.get("option_type") == "CE"), None)
+                if atm_call and float(atm_call.get("iv", 0.0) or 0.0) > 0:
+                    ivs.append(float(atm_call["iv"]))
+                elif chain:
+                    valid_strikes = [c for c in chain if float(c.get("iv", 0.0) or 0.0) > 0]
+                    if valid_strikes:
+                        ivs.append(float(valid_strikes[0]["iv"]))
+            except Exception:
+                continue
+        return ivs
+
+    async def get_iv_rank_and_percentile(
+        self,
+        underlying_symbol: str,
+        current_iv: float,
+        lookback_days: int = 90,
+    ) -> Dict[str, Any]:
+        """Calculate IV Rank and IV Percentile from historical option snapshots."""
+        from options.greeks import GreeksCalculator
+
+        historical_ivs = await self.get_historical_atm_ivs(underlying_symbol, lookback_days=lookback_days)
+        if not historical_ivs or current_iv <= 0:
+            return {
+                "symbol": underlying_symbol.upper(),
+                "current_iv": current_iv,
+                "iv_rank": 50.0,
+                "iv_percentile": 50.0,
+                "min_iv": current_iv,
+                "max_iv": current_iv,
+                "samples_count": len(historical_ivs),
+                "lookback_days": lookback_days,
+                "has_sufficient_history": False,
+            }
+
+        min_iv = min(historical_ivs)
+        max_iv = max(historical_ivs)
+        ivr = GreeksCalculator.compute_iv_rank(current_iv, min_iv, max_iv)
+        ivp = GreeksCalculator.compute_iv_percentile(current_iv, historical_ivs)
+
+        return {
+            "symbol": underlying_symbol.upper(),
+            "current_iv": round(current_iv, 4),
+            "iv_rank": ivr,
+            "iv_percentile": ivp,
+            "min_iv": round(min_iv, 4),
+            "max_iv": round(max_iv, 4),
+            "samples_count": len(historical_ivs),
+            "lookback_days": lookback_days,
+            "has_sufficient_history": len(historical_ivs) >= 10,
+        }
+
+    async def prune_option_snapshots(self, keep_days: int = 14) -> int:
+        """Delete option snapshots older than keep_days days to prevent unbounded SQLite growth."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import delete
+
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(days=keep_days)).isoformat()
+        stmt = delete(OptionSnapshot).where(OptionSnapshot.timestamp < cutoff)
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return result.rowcount if hasattr(result, "rowcount") else 0

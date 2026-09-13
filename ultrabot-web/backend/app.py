@@ -367,7 +367,47 @@ async def lifespan(app: FastAPI):
         )
         option_recorder.start()
         app.state.option_recorder = option_recorder
-        logger.info("OptionChainRecorder started: active for NIFTY/BANKNIFTY chain ingestion")
+
+        # Wave-1 style task supervisor for OptionChainRecorder
+        async def _supervise_option_recorder():
+            while True:
+                try:
+                    await asyncio.sleep(30.0)
+                    rec = getattr(app.state, "option_recorder", None)
+                    if rec and getattr(rec, "_running", False):
+                        task = getattr(rec, "_fast_task", None)
+                        if task is None or task.done():
+                            logger.warning("OptionChainRecorder task was dead or done; respawning...")
+                            rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
+                except asyncio.CancelledError:
+                    break
+                except Exception as sup_err:
+                    logger.debug("OptionChainRecorder supervisor error: %s", sup_err)
+
+        rec_supervisor_task = asyncio.create_task(_supervise_option_recorder())
+        app.state.option_recorder_supervisor = rec_supervisor_task
+        logger.info("OptionChainRecorder started: active with supervisor for NIFTY/BANKNIFTY chain ingestion")
+
+        # Daily maintenance: prune old option snapshots (>14 days)
+        async def _prune_old_snapshots_task():
+            try:
+                getter = repo_getter()
+                repo = await getter if asyncio.iscoroutine(getter) else getter
+                try:
+                    if hasattr(repo, "prune_option_snapshots"):
+                        deleted = await repo.prune_option_snapshots(keep_days=14)
+                        if deleted > 0:
+                            logger.info("Daily maintenance: pruned %d option snapshots older than 14 days", deleted)
+                finally:
+                    if hasattr(repo, "close"):
+                        res = repo.close()
+                        if asyncio.iscoroutine(res):
+                            await res
+            except Exception as prune_err:
+                logger.debug("Option snapshot pruning task error: %s", prune_err)
+
+        asyncio.create_task(_prune_old_snapshots_task())
+
     except Exception as rec_exc:
         logger.warning("OptionChainRecorder failed to start (non-fatal): %s", rec_exc)
 
@@ -386,6 +426,8 @@ async def lifespan(app: FastAPI):
         app.state.db_backup_task.cancel()
     if hasattr(app.state, "db_backup_job"):
         app.state.db_backup_job.stop()
+    if hasattr(app.state, "option_recorder_supervisor") and app.state.option_recorder_supervisor:
+        app.state.option_recorder_supervisor.cancel()
     if hasattr(app.state, "option_recorder") and app.state.option_recorder:
         try:
             await app.state.option_recorder.stop()
@@ -513,6 +555,14 @@ async def health():
     except Exception as e:
         db_status = f"error: {str(e)}"
 
+    option_recorder_health = None
+    try:
+        rec = getattr(app.state, "option_recorder", None)
+        if rec is not None and hasattr(rec, "get_health"):
+            option_recorder_health = rec.get_health()
+    except Exception:
+        option_recorder_health = None
+
     return {
         "status": "healthy" if db_status == "ok" else "degraded",
         "app": settings.app_name,
@@ -529,6 +579,7 @@ async def health():
         "telegram_poll_timeout": tg_poll_timeout,
         "telegram_poll_respawns": tg_poll_respawns,
         "telegram_poll_last_death": tg_poll_last_death,
+        "option_recorder": option_recorder_health,
     }
 
 

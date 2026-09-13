@@ -7,6 +7,8 @@ Runs in pure read-only ingestion mode with zero trading execution risk.
 """
 import asyncio
 import logging
+import random
+import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -44,8 +46,15 @@ class OptionChainRecorder:
 
         self._running = False
         self._fast_task: Optional[asyncio.Task] = None
-        self._full_task: Optional[asyncio.Task] = None
         self._last_full_poll: Dict[str, float] = {}
+
+        # Telemetry & Observability
+        self.polls_count: int = 0
+        self.rate_limit_hits_429: int = 0
+        self.consecutive_errors: int = 0
+        self.last_poll_time: Optional[float] = None
+        self.last_heartbeat: Optional[float] = None
+        self.last_verification_status: Dict[str, Any] = {}
 
     async def _resolve_broker(self) -> Any:
         """Resolve current broker instance either from static attribute or dynamic getter."""
@@ -75,15 +84,13 @@ class OptionChainRecorder:
         if not self._running:
             return
         self._running = False
-        for task in (self._fast_task, self._full_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        if self._fast_task and not self._fast_task.done():
+            self._fast_task.cancel()
+            try:
+                await self._fast_task
+            except asyncio.CancelledError:
+                pass
         self._fast_task = None
-        self._full_task = None
         logger.info("OptionChainRecorder stopped.")
 
     async def poll_and_record_once(self, symbol: str, full_chain: bool = False) -> Dict[str, Any]:
@@ -101,6 +108,11 @@ class OptionChainRecorder:
             if not parsed_chain or not parsed_chain.get("calls"):
                 logger.debug("Option chain empty for %s", symbol)
                 return {"status": "empty", "symbol": symbol}
+
+            now_epoch = datetime.now(IST).timestamp()
+            self.last_poll_time = now_epoch
+            self.polls_count += 1
+            self.consecutive_errors = 0
 
             spot = float(parsed_chain.get("spot_price", 0.0) or 0.0)
             atm_strike = float(parsed_chain.get("atm_strike", 0.0) or spot)
@@ -129,28 +141,64 @@ class OptionChainRecorder:
                 puts_to_record = all_puts
                 tier = "full"
 
-            # Black-Scholes Greeks Verification for ATM Call
+            # Black-Scholes Greeks Verification for ATM Call & Put with Provenance
             atm_call = next((c for c in all_calls if c["strike"] == atm_strike), None)
-            verification = {"valid": True, "details": "No ATM call found"}
+            atm_put = next((p for p in all_puts if p["strike"] == atm_strike), None)
+
+            ce_verif = {"valid": True, "details": "No ATM call found"}
+            pe_verif = {"valid": True, "details": "No ATM put found"}
+
             if atm_call and spot > 0:
-                tte_years = max(float(atm_call.get("expiry_epoch", 0) - datetime.now(IST).timestamp()) / (365.0 * 86400.0), 0.001) if atm_call.get("expiry_epoch") else 0.02
-                iv = float(atm_call.get("iv", 0.0) or 0.15)
+                has_epoch = bool(atm_call.get("expiry_epoch"))
+                tte_years = max(float(atm_call.get("expiry_epoch", 0) - now_epoch) / (365.0 * 86400.0), 0.001) if has_epoch else 0.02
+                raw_iv = float(atm_call.get("iv", 0.0) or 0.0)
+                has_iv = raw_iv > 0.0
+                iv = raw_iv if has_iv else 0.15
                 theo_greeks = self.greeks_calc.all_greeks(
                     S=spot,
                     K=atm_strike,
                     T=tte_years,
-                    sigma=iv if iv > 0 else 0.15,
+                    sigma=iv,
                     option_type="CE",
                 )
-                verification = self.greeks_calc.verify_greeks(
+                ce_verif = self.greeks_calc.verify_greeks(
                     broker_greeks=atm_call,
                     theoretical_greeks=theo_greeks,
                     tolerance=0.25,
+                    provenance={"tte_assumed": not has_epoch, "iv_assumed": not has_iv, "tte_years": round(tte_years, 4), "iv": round(iv, 4)},
                 )
 
-            # Persist to database if repository available
+            if atm_put and spot > 0:
+                has_epoch = bool(atm_put.get("expiry_epoch"))
+                tte_years = max(float(atm_put.get("expiry_epoch", 0) - now_epoch) / (365.0 * 86400.0), 0.001) if has_epoch else 0.02
+                raw_iv = float(atm_put.get("iv", 0.0) or 0.0)
+                has_iv = raw_iv > 0.0
+                iv = raw_iv if has_iv else 0.15
+                theo_greeks = self.greeks_calc.all_greeks(
+                    S=spot,
+                    K=atm_strike,
+                    T=tte_years,
+                    sigma=iv,
+                    option_type="PE",
+                )
+                pe_verif = self.greeks_calc.verify_greeks(
+                    broker_greeks=atm_put,
+                    theoretical_greeks=theo_greeks,
+                    tolerance=0.25,
+                    provenance={"tte_assumed": not has_epoch, "iv_assumed": not has_iv, "tte_years": round(tte_years, 4), "iv": round(iv, 4)},
+                )
+
+            verification = {
+                "valid": bool(ce_verif.get("valid", True) and pe_verif.get("valid", True)),
+                "ce": ce_verif,
+                "pe": pe_verif,
+            }
+            self.last_verification_status[symbol] = verification
+
+            # Persist to database if repository available (with defensive session cleanup)
             snapshot_obj = None
             if self._repo_getter:
+                repo = None
                 try:
                     getter_res = self._repo_getter()
                     repo = await getter_res if asyncio.iscoroutine(getter_res) else getter_res
@@ -171,6 +219,14 @@ class OptionChainRecorder:
                         )
                 except Exception as db_err:
                     logger.warning("Failed to persist option snapshot for %s: %s", symbol, db_err)
+                finally:
+                    if repo and hasattr(repo, "close"):
+                        try:
+                            close_res = repo.close()
+                            if asyncio.iscoroutine(close_res):
+                                await close_res
+                        except Exception:
+                            pass
 
             return {
                 "status": "success",
@@ -187,13 +243,21 @@ class OptionChainRecorder:
             }
 
         except Exception as err:
-            logger.error("Error polling option chain for %s: %s", symbol, err, exc_info=True)
-            return {"status": "error", "symbol": symbol, "error": str(err)}
+            err_str = str(err)
+            self.consecutive_errors += 1
+            if "429" in err_str or "rate limit" in err_str.lower():
+                self.rate_limit_hits_429 += 1
+                logger.warning("Rate limit 429 hit while polling option chain for %s: %s", symbol, err)
+            else:
+                logger.error("Error polling option chain for %s: %s", symbol, err, exc_info=True)
+            return {"status": "error", "symbol": symbol, "error": err_str}
 
     async def _fast_poll_loop(self) -> None:
         """Background continuous worker polling tradable strikes and periodic full chain."""
         while self._running:
             try:
+                self.last_heartbeat = time.time()
+
                 # Outside market hours, sleep longer unless forced for offline testing
                 market_open = True
                 try:
@@ -214,10 +278,30 @@ class OptionChainRecorder:
                     if is_full and res.get("status") == "success":
                         self._last_full_poll[sym] = now
 
-                await asyncio.sleep(self.poll_interval_fast)
+                    # Micro-delay between symbols to avoid burst
+                    await asyncio.sleep(0.2)
+
+                # Small jitter (0.1s to 0.4s) to avoid lockstep API hammering
+                jitter = random.uniform(0.1, 0.4)
+                await asyncio.sleep(self.poll_interval_fast + jitter)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self.consecutive_errors += 1
                 logger.warning("Error in option recorder loop: %s", e)
                 await asyncio.sleep(5.0)
+
+    def get_health(self) -> Dict[str, Any]:
+        """Return runtime telemetry for health check and supervisor."""
+        now = time.time()
+        return {
+            "running": self._running,
+            "task_alive": bool(self._fast_task and not self._fast_task.done()),
+            "polls_count": self.polls_count,
+            "last_poll_seconds_ago": round(now - self.last_poll_time, 1) if self.last_poll_time else None,
+            "last_heartbeat_seconds_ago": round(now - self.last_heartbeat, 1) if self.last_heartbeat else None,
+            "rate_limit_hits_429": self.rate_limit_hits_429,
+            "consecutive_errors": self.consecutive_errors,
+            "last_verification": self.last_verification_status,
+        }

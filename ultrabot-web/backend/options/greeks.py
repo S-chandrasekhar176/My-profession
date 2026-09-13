@@ -274,6 +274,7 @@ class GreeksCalculator:
         broker_greeks: dict,
         theoretical_greeks: dict,
         tolerance: float = 0.20,
+        provenance: Optional[dict] = None,
     ) -> dict:
         """Verify broker-provided Greeks against analytical Black-Scholes benchmark."""
         divergences = {}
@@ -293,11 +294,32 @@ class GreeksCalculator:
             if rel_err > tolerance and diff > 0.05:
                 valid = False
 
-        return {
+        res = {
             "valid": valid,
             "divergence": divergences,
             "message": "Greeks verified within tolerance" if valid else f"Divergence detected in {list(divergences.keys())}",
         }
+        if provenance:
+            res["provenance"] = provenance
+        return res
+
+    @staticmethod
+    def compute_iv_rank(current_iv: float, min_iv: float, max_iv: float) -> float:
+        """Compute Implied Volatility Rank (IVR): where current IV sits within lookback range (0-100%)."""
+        if max_iv <= min_iv or current_iv <= 0:
+            return 0.0
+        ivr = ((current_iv - min_iv) / (max_iv - min_iv)) * 100.0
+        return round(max(0.0, min(100.0, ivr)), 2)
+
+    @staticmethod
+    def compute_iv_percentile(current_iv: float, historical_ivs: list) -> float:
+        """Compute Implied Volatility Percentile (IVP): percentage of historical observations below current IV (0-100%)."""
+        valid_ivs = [float(v) for v in (historical_ivs or []) if v and float(v) > 0]
+        if not valid_ivs or current_iv <= 0:
+            return 0.0
+        below_count = sum(1 for v in valid_ivs if v < current_iv)
+        ivp = (below_count / len(valid_ivs)) * 100.0
+        return round(max(0.0, min(100.0, ivp)), 2)
 
     def simulate_pnl_move(
         self,

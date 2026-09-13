@@ -161,3 +161,43 @@ async def check_theta_budget_endpoint(
         holding_fraction_of_day=holding_fraction,
     )
     return result
+
+
+@router.get("/iv-rank")
+async def get_iv_rank_endpoint(
+    symbol: str = Query("NIFTY", description="Underlying symbol"),
+    current_iv: float = Query(0.15, description="Current implied volatility (e.g. 0.15 for 15%)"),
+    lookback_days: int = Query(90, ge=7, le=365, description="Lookback window in days"),
+    repo: Repository = Depends(get_repository),
+    _user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Calculate IV Rank and IV Percentile against historical snapshot distributions."""
+    try:
+        return await repo.get_iv_rank_and_percentile(
+            underlying_symbol=symbol,
+            current_iv=current_iv,
+            lookback_days=lookback_days,
+        )
+    except Exception as exc:
+        logger.error("Failed to compute IV rank for %s: %s", symbol, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/prune")
+async def prune_snapshots_endpoint(
+    keep_days: int = Query(14, ge=1, le=90, description="Keep snapshots newer than this many days"),
+    repo: Repository = Depends(get_repository),
+    _user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Prune historical option snapshots older than keep_days."""
+    try:
+        deleted = await repo.prune_option_snapshots(keep_days=keep_days)
+        return {
+            "status": "success",
+            "deleted_count": deleted,
+            "keep_days": keep_days,
+            "message": f"Pruned {deleted} option snapshot rows older than {keep_days} days.",
+        }
+    except Exception as exc:
+        logger.error("Failed to prune option snapshots: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
