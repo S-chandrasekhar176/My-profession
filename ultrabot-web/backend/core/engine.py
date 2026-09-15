@@ -3636,6 +3636,21 @@ class UltraBotEngine:
         except Exception:
             estimated_costs = None
 
+        # Phase P4: ML Shadow Advisor (Gate G21 advisory)
+        ml_eval = None
+        try:
+            from ml.inference import get_inference_engine
+            ml_engine = get_inference_engine()
+            ml_eval = ml_engine.score_signal(
+                signal=signal,
+                vix=float(self.vix or 15.0),
+                regime=str(self.current_regime or "sideways"),
+                pcr=float(getattr(self, "current_pcr", 1.0) or 1.0),
+                iv_rank=float(getattr(self, "current_iv_rank", 50.0) or 50.0),
+            )
+        except Exception as ml_err:
+            logger.debug("ML advisory scoring failed: %s", ml_err)
+
         return {
             "id": opportunity_id,
             "signal_id": resolved_signal_id,
@@ -3694,6 +3709,10 @@ class UltraBotEngine:
             "win_rate": signal.get("win_rate"),
             "avg_rr": signal.get("avg_rr"),
             "notes": risk_result.get("notes", ""),
+            "ml_score": ml_eval.get("score") if ml_eval else None,
+            "ml_action": ml_eval.get("action") if ml_eval else None,
+            "ml_win_probability": ml_eval.get("win_probability") if ml_eval else None,
+            "ml_eval": ml_eval,
         }
 
     # ------------------------------------------------------------------

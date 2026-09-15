@@ -60,6 +60,7 @@ from api.routes import (
     candles,
     analytics,
     options,
+    ml,
 )
 from api.websocket import ws_manager, router as ws_router
 
@@ -360,7 +361,7 @@ async def lifespan(app: FastAPI):
             broker=getattr(fyers_feed, "_broker", None) if fyers_feed else None,
             broker_getter=_resolve_fyers_broker_dynamic,
             repo_getter=repo_getter,
-            symbols=["NIFTY", "BANKNIFTY"],
+            symbols=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"],
             poll_interval_fast=5.0,
             poll_interval_full=60.0,
             market_hours=market_hours,
@@ -476,6 +477,7 @@ app.include_router(scanner.router)
 app.include_router(candles.router)
 app.include_router(analytics.router)
 app.include_router(options.router)
+app.include_router(ml.router)
 app.include_router(ws_router)
 
 

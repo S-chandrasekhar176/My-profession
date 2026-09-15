@@ -273,6 +273,11 @@ export async function getWatchlist(): ApiResponse<string[] | { watchlist: string
   return data;
 }
 
+export async function getKronosHotlist(): ApiResponse<any[]> {
+  const { data } = await api.get('/api/scanner/kronos');
+  return data;
+}
+
 // ─────────────────────────────────────────────
 // Brokers
 // ─────────────────────────────────────────────
@@ -798,8 +803,279 @@ export interface KronosHotStockItem {
   [key: string]: unknown;
 }
 
-export async function getKronosHotlist(): ApiResponse<KronosHotStockItem[] | { hotlist: KronosHotStockItem[] }> {
-  const { data } = await api.get('/api/scanner/kronos');
+// ─────────────────────────────────────────────
+// Options & F&O Data Foundation
+// ─────────────────────────────────────────────
+
+export interface OptionContract {
+  symbol: string;
+  strike: number;
+  strike_price?: number;
+  option_type: 'CE' | 'PE';
+  ltp: number;
+  premium?: number;
+  oi: number;
+  oi_change?: number;
+  volume?: number;
+  bid?: number;
+  ask?: number;
+  iv?: number;
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
+  expiry?: string;
+  expiry_epoch?: number;
+}
+
+export interface OptionSnapshotData {
+  id: string;
+  timestamp: string;
+  underlying_symbol: string;
+  spot_price: number;
+  expiry: string;
+  atm_strike: number;
+  max_pain?: number;
+  pcr: number;
+  total_ce_oi: number;
+  total_pe_oi: number;
+  tier: string;
+  chain_data: OptionContract[];
+  created_at: string;
+}
+
+export async function getOptionSnapshots(symbol: string = 'NIFTY', limit: number = 1, expiry?: string): ApiResponse<{ symbol: string; count: number; snapshots: OptionSnapshotData[] }> {
+  const { data } = await api.get('/api/options/snapshots', { params: { symbol, limit, expiry } });
+  return data;
+}
+
+export async function getOptionExpiries(symbol: string = 'NIFTY'): ApiResponse<{ symbol: string; expiries: string[] }> {
+  const { data } = await api.get(`/api/options/expiries/${symbol}`);
+  return data;
+}
+
+export async function getOptionIvRank(symbol: string, currentIv?: number): ApiResponse<Record<string, any>> {
+  const { data } = await api.get(`/api/options/iv-rank/${symbol}`, { params: { current_iv: currentIv } });
+  return data;
+}
+
+export async function checkThetaBudget(params: {
+  expected_move_points: number;
+  delta: number;
+  daily_theta: number;
+  round_trip_cost_per_share?: number;
+  holding_fraction_of_day?: number;
+}): ApiResponse<Record<string, any>> {
+  const { data } = await api.post('/api/options/theta-budget', params);
+  return data;
+}
+
+// ─────────────────────────────────────────────
+// Machine Learning (M3a)
+// ─────────────────────────────────────────────
+
+export async function getMlStatus(): ApiResponse<Record<string, any>> {
+  const { data } = await api.get('/api/ml/status');
+  return data;
+}
+
+export async function triggerMlTrain(params?: number | { use_synthetic_bootstrap_if_sparse?: boolean; min_samples_threshold?: number }): ApiResponse<Record<string, any>> {
+  const payload = typeof params === 'number' ? { min_samples_threshold: params } : (params || {});
+  const { data } = await api.post('/api/ml/train', payload);
+  return data;
+}
+
+export async function scoreMlSignal(params: {
+  symbol: string;
+  direction: string;
+  strategy: string;
+  vix?: number;
+  regime?: string;
+  pcr?: number;
+  iv_rank?: number;
+}): ApiResponse<Record<string, any>> {
+  const { data } = await api.post('/api/ml/score', params);
+  return data;
+}
+
+export interface PipelineStep {
+  name: string;
+  desc: string;
+  status: 'passed' | 'failed' | 'warning' | 'info' | 'pass' | 'favorable' | 'veto' | 'neutral';
+  val?: string | number;
+  summary?: string;
+  value?: string | number;
+}
+
+export interface MlEvaluation {
+  id?: string;
+  evaluation_id: string;
+  timestamp: string;
+  symbol: string;
+  direction: string;
+  strategy: string;
+  score: number;
+  win_probability: number;
+  action: 'ALLOW' | 'REDUCE_SIZE' | 'VETO' | 'PASS' | 'FAVORABLE' | 'NEUTRAL' | string;
+  reason?: string;
+  contributions: Record<string, number>;
+  pipeline_steps: PipelineStep[];
+  features?: Record<string, any>;
+  veto?: boolean;
+  veto_threshold?: number;
+  favorable_threshold?: number;
+  notes?: string;
+}
+
+export interface CalibrationDecile {
+  bin: string;
+  midpoint?: number;
+  count?: number;
+  actual_win_rate?: number;
+  predicted_win_rate?: number;
+  predicted?: number;
+  observed?: number;
+  ideal?: number;
+}
+
+export interface MlScorecardMetrics {
+  total_evaluations: number;
+  edge_uplift_pct: number;
+  brier_score: number;
+  baseline_win_rate_pct?: number;
+  model_win_rate_pct?: number;
+  roc_auc?: number;
+  avg_vix?: number;
+  veto_savings_estimate: number;
+  drift_status: 'stable' | 'moderate' | 'high' | 'HEALTHY' | string;
+  drift_metric_value: number;
+  model_ready?: boolean;
+  feature_names?: string[];
+  calibration_curve: CalibrationDecile[];
+  vix?: number;
+  veto_threshold?: number;
+  favorable_threshold?: number;
+  model_version?: string;
+  is_fitted?: boolean;
+  favorable_count?: number;
+  veto_count?: number;
+  neutral_count?: number;
+}
+
+export async function getMlMetrics(): ApiResponse<MlScorecardMetrics> {
+  const { data } = await api.get('/api/ml/metrics');
+  return data;
+}
+
+export async function getMlEvaluations(limit: number = 50, action?: string): ApiResponse<{ total: number; evaluations: MlEvaluation[] }> {
+  const { data } = await api.get('/api/ml/evaluations', { params: { limit, action } });
+  return data;
+}
+
+export interface TradeCurvePoint {
+  index: number;
+  id: string;
+  symbol: string;
+  direction: string;
+  strategy: string;
+  timestamp: string;
+  date: string;
+  trade_pnl: number;
+  is_win: boolean;
+  cumulative_profit: number;
+  cumulative_loss: number;
+  cumulative_net_pnl: number;
+}
+
+export interface TradeDistributionItem {
+  id: string;
+  symbol: string;
+  amount: number;
+  is_win: boolean;
+  date: string;
+}
+
+export interface DailyTimelineItem {
+  date: string;
+  pnl: number;
+  trades_count: number;
+}
+
+export interface RecentExecutedTradeItem {
+  id: string;
+  symbol: string;
+  direction: string;
+  action: 'WIN' | 'LOSS';
+  pnl: number;
+  is_win: boolean;
+  timestamp: string;
+  strategy?: string;
+  status?: string;
+}
+
+export interface StrategyPerformanceItem {
+  strategy: string;
+  trades_count: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  net_pnl: number;
+  avg_trade_pnl: number;
+  profit_factor: number;
+  status_tag: string;
+  expectancy?: number;
+  profit_share_pct?: number;
+  description?: string;
+  best_regime?: string;
+}
+
+export interface MlAlphaAdvisory {
+  current_regime: string;
+  market_vix: number;
+  top_alpha_strategy: string;
+  top_alpha_pnl: number;
+  regime_insight: string;
+  ml_filter_status: string;
+  gated_signals_count?: number;
+}
+
+export interface RegimeAttributionItem {
+  strategy: string;
+  regime: string;
+  total_trades: number;
+  wins: number;
+  losses: number;
+  total_pnl: number;
+  win_rate: number;
+}
+
+export interface TradesPerformanceData {
+  source: 'ledger' | 'shadow';
+  system: string;
+  monitoring_status: string;
+  total_trades: number;
+  win_trades: number;
+  loss_trades: number;
+  win_rate_pct: number;
+  net_profit: number;
+  total_gain: number;
+  total_loss: number;
+  avg_win: number;
+  avg_loss: number;
+  curves: TradeCurvePoint[];
+  distribution: TradeDistributionItem[];
+  daily_timeline: DailyTimelineItem[];
+  recent_trades: RecentExecutedTradeItem[];
+  strategy_breakdown?: StrategyPerformanceItem[];
+  regime_attribution?: RegimeAttributionItem[];
+  ml_alpha_advisory?: MlAlphaAdvisory;
+}
+
+export async function getTradesPerformanceCurves(source: 'ledger' | 'shadow' = 'ledger'): ApiResponse<TradesPerformanceData> {
+  const { data } = await api.get('/api/trades/curves/performance', {
+    params: { source },
+    timeout: 30_000,
+  });
   return data;
 }
 

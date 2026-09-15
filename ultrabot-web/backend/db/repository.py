@@ -1565,19 +1565,31 @@ class Repository:
         self,
         underlying_symbol: str,
         limit: int = 50,
+        expiry: Optional[str] = None,
     ):
         """Fetch the most recent option snapshots for an underlying symbol."""
         from db.migrations import OptionSnapshot
         from sqlalchemy import select
 
-        stmt = (
-            select(OptionSnapshot)
-            .where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
-            .order_by(OptionSnapshot.timestamp.desc())
-            .limit(limit)
-        )
+        stmt = select(OptionSnapshot).where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
+        if expiry:
+            stmt = stmt.where(OptionSnapshot.expiry == expiry)
+        stmt = stmt.order_by(OptionSnapshot.timestamp.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_symbol_expiries(self, underlying_symbol: str) -> List[str]:
+        """Fetch all unique recorded expiry dates for an underlying symbol."""
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select, distinct
+
+        stmt = (
+            select(distinct(OptionSnapshot.expiry))
+            .where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
+            .order_by(OptionSnapshot.expiry.asc())
+        )
+        result = await self.session.execute(stmt)
+        return [str(r[0]) for r in result.fetchall() if r[0]]
 
     async def get_historical_atm_ivs(
         self,

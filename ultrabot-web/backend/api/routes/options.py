@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from api.dependencies import get_current_user, get_repository
+from api.dependencies import get_current_user, get_optional_user, get_repository
 from db.repository import Repository
 from options.greeks import GreeksCalculator
 
@@ -16,14 +16,19 @@ router = APIRouter(prefix="/api/options", tags=["options"])
 
 @router.get("/snapshots")
 async def get_option_snapshots(
-    symbol: str = Query("NIFTY", description="Underlying symbol (e.g. NIFTY, BANKNIFTY)"),
+    symbol: str = Query("NIFTY", description="Underlying symbol (e.g. NIFTY, BANKNIFTY, FINNIFTY, SENSEX)"),
     limit: int = Query(20, ge=1, le=100, description="Max snapshots to retrieve"),
+    expiry: Optional[str] = Query(None, description="Filter by specific expiry date (e.g. 15-09-2026)"),
     repo: Repository = Depends(get_repository),
-    _user=Depends(get_current_user),
+    _user=Depends(get_optional_user),
 ) -> Dict[str, Any]:
     """Retrieve recorded historical option chain snapshots."""
     try:
-        snapshots = await repo.get_latest_option_snapshots(underlying_symbol=symbol, limit=limit)
+        snapshots = await repo.get_latest_option_snapshots(
+            underlying_symbol=symbol,
+            limit=limit,
+            expiry=expiry,
+        )
         items = []
         for s in snapshots:
             try:
@@ -45,6 +50,7 @@ async def get_option_snapshots(
                 "total_pe_oi": s.total_pe_oi,
                 "tier": s.tier,
                 "chain_length": len(parsed_chain),
+                "chain_data": parsed_chain,
                 "created_at": s.created_at,
             })
         return {
@@ -57,6 +63,27 @@ async def get_option_snapshots(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching snapshots: {exc}",
+        )
+
+
+@router.get("/expiries/{symbol}")
+async def get_symbol_expiries_endpoint(
+    symbol: str,
+    repo: Repository = Depends(get_repository),
+    _user=Depends(get_optional_user),
+) -> Dict[str, Any]:
+    """Retrieve all available expiry dates for a symbol."""
+    try:
+        expiries = await repo.get_symbol_expiries(underlying_symbol=symbol)
+        return {
+            "symbol": symbol.upper(),
+            "expiries": expiries,
+        }
+    except Exception as exc:
+        logger.error("Failed to fetch expiries for %s: %s", symbol, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching expiries: {exc}",
         )
 
 
@@ -163,23 +190,25 @@ async def check_theta_budget_endpoint(
     return result
 
 
+@router.get("/iv-rank/{symbol}")
 @router.get("/iv-rank")
 async def get_iv_rank_endpoint(
-    symbol: str = Query("NIFTY", description="Underlying symbol"),
+    symbol: Optional[str] = None,
     current_iv: float = Query(0.15, description="Current implied volatility (e.g. 0.15 for 15%)"),
     lookback_days: int = Query(90, ge=7, le=365, description="Lookback window in days"),
     repo: Repository = Depends(get_repository),
-    _user=Depends(get_current_user),
+    _user=Depends(get_optional_user),
 ) -> Dict[str, Any]:
     """Calculate IV Rank and IV Percentile against historical snapshot distributions."""
+    target_symbol = symbol or "NIFTY"
     try:
         return await repo.get_iv_rank_and_percentile(
-            underlying_symbol=symbol,
+            underlying_symbol=target_symbol,
             current_iv=current_iv,
             lookback_days=lookback_days,
         )
     except Exception as exc:
-        logger.error("Failed to compute IV rank for %s: %s", symbol, exc)
+        logger.error("Failed to compute IV rank for %s: %s", target_symbol, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

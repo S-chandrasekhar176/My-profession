@@ -365,6 +365,8 @@ class FyersBroker(BaseBroker):
                 fyers_symbol = "NSE:FINNIFTY-INDEX"
             elif sym_upper in ("MIDCPNIFTY", "NIFTYMIDCAP"):
                 fyers_symbol = "NSE:MIDCPNIFTY-INDEX"
+            elif sym_upper in ("SENSEX", "BSESENSEX", "BSE:SENSEX"):
+                fyers_symbol = "BSE:SENSEX-INDEX"
             elif ":" in symbol:
                 fyers_symbol = symbol
             else:
