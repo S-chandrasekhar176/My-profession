@@ -420,7 +420,7 @@ export default function LossCalibrationTab({ metrics, onInspectItem }: LossCalib
               <line x1="30" y1="120" x2="310" y2="120" stroke="rgba(255,255,255,0.08)" strokeWidth="1" />
               <line x1="30" y1="80" x2="310" y2="80" stroke="rgba(255,255,255,0.04)" strokeWidth="1" strokeDasharray="3 3" />
               <line x1="30" y1="40" x2="310" y2="40" stroke="rgba(255,255,255,0.04)" strokeWidth="1" strokeDasharray="3 3" />
-              
+
               {/* Y Axis Labels */}
               <text x="10" y="42" fill="#848e9c" fontSize="8" fontFamily="monospace">0.70</text>
               <text x="10" y="82" fill="#848e9c" fontSize="8" fontFamily="monospace">0.55</text>
@@ -498,7 +498,7 @@ export default function LossCalibrationTab({ metrics, onInspectItem }: LossCalib
             <svg className="w-full h-full" viewBox="0 0 320 140">
               {/* 45 degree ideal line (dashed gray) */}
               <line x1="30" y1="120" x2="300" y2="20" stroke="rgba(255,255,255,0.2)" strokeWidth="1" strokeDasharray="3 3" />
-              
+
               {/* Axes */}
               <line x1="30" y1="120" x2="300" y2="120" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
               <line x1="30" y1="120" x2="30" y2="20" stroke="rgba(255,255,255,0.1)" strokeWidth="1" />
@@ -584,13 +584,12 @@ export default function LossCalibrationTab({ metrics, onInspectItem }: LossCalib
                     <td className="py-1.5 px-3 text-[#848e9c]">{(variance * 100).toFixed(1)}%</td>
                     <td className="py-1.5 px-3">
                       <Badge
-                        className={`text-[8px] font-mono ${
-                          isVeto
+                        className={`text-[8px] font-mono ${isVeto
                             ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
                             : isFavorable
-                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                            : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
-                        }`}
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                              : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
+                          }`}
                       >
                         {isVeto ? 'GATE G21 VETO' : isFavorable ? 'FAVORABLE SIZING' : 'NEUTRAL PASS'}
                       </Badge>

@@ -51,6 +51,14 @@ class MLInferenceEngine:
             try:
                 self.model = CalibratedLinearModel.load(str(self.model_path))
                 logger.info("Loaded M3a ML model from %s", self.model_path)
+                if getattr(self.model, "means", None) is not None:
+                    self.builder.means = self.model.means
+                    self.builder.stds = self.model.stds
+                else:
+                    bootstrap_samples = self.builder.generate_synthetic_bootstrap(n_samples=150)
+                    self.builder.build_dataset(bootstrap_samples, fit_scaler=True)
+                    self.model.means = self.builder.means
+                    self.model.stds = self.builder.stds
                 self._seed_initial_evaluations_if_empty()
                 return
             except Exception as e:
@@ -104,14 +112,15 @@ class MLInferenceEngine:
 
         # 2. Final fit on all available data
         self.model.fit(X, y)
+        self.model.means = self.builder.means
+        self.model.stds = self.builder.stds
 
         # 3. Persist model
         if save_to_disk:
             self.save()
 
         logger.info(
-            "M3a model trained on %d samples: Baseline WR=%.1f%%, Model WR=%.1f%%, Uplift=+%.1f%%, Brier=%.4f",
-            len(X),
+            "Trained M3a model: Base WR %.1f%% -> Model WR %.1f%% (Uplift %+.1f%%, Brier %.4f)",
             val_report["baseline_win_rate_pct"],
             val_report["model_win_rate_pct"],
             val_report["overall_uplift_pct"],
@@ -130,9 +139,17 @@ class MLInferenceEngine:
         iv_rank: float = 50.0,
     ) -> Dict[str, Any]:
         """Score a live signal and return calibrated probability, rating, and feature contributions."""
-        # 1. Extract point-in-time features from candle frame
+        # 1. Extract point-in-time features from candle frame or signal snapshots
         now = signal.get("timestamp")
-        pit_snapshot = compute_feature_snapshot(candles_df, now=now)
+        df_to_use = candles_df if candles_df is not None else (signal.get("candles_df") or signal.get("_df_candles"))
+        if df_to_use is not None:
+            pit_snapshot = compute_feature_snapshot(df_to_use, now=now)
+        elif signal.get("features_snapshot"):
+            pit_snapshot = signal["features_snapshot"]
+        elif signal.get("features"):
+            pit_snapshot = signal["features"]
+        else:
+            pit_snapshot = compute_feature_snapshot(None, now=now)
 
         # 2. Build complete feature dictionary
         row_dict = {

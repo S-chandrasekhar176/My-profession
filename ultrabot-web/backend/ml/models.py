@@ -115,13 +115,18 @@ class CalibratedLinearModel:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize model parameters to JSON-safe dictionary."""
-        return {
+        d = {
             "model_type": "CalibratedLinearModel",
             "weights": self.weights.tolist() if self.weights is not None else [],
             "bias": float(self.bias),
             "temperature": float(self.temperature),
             "is_fitted": self.is_fitted,
         }
+        if hasattr(self, "means") and self.means is not None:
+            d["means"] = self.means.tolist() if hasattr(self.means, "tolist") else list(self.means)
+        if hasattr(self, "stds") and self.stds is not None:
+            d["stds"] = self.stds.tolist() if hasattr(self.stds, "tolist") else list(self.stds)
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "CalibratedLinearModel":
@@ -131,6 +136,14 @@ class CalibratedLinearModel:
         model.bias = float(d.get("bias", 0.0))
         model.temperature = float(d.get("temperature", 1.0))
         model.is_fitted = bool(d.get("is_fitted", True))
+        if "means" in d and d["means"]:
+            model.means = np.array(d["means"], dtype=np.float64)
+        else:
+            model.means = None
+        if "stds" in d and d["stds"]:
+            model.stds = np.array(d["stds"], dtype=np.float64)
+        else:
+            model.stds = None
         return model
 
     def save(self, filepath: str) -> None:

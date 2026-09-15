@@ -2460,6 +2460,7 @@ class UltraBotEngine:
                     # v0.4.12: ride the point-in-time snapshot on the signal
                     # dict — _register_shadow copies it into the dataset.
                     res.setdefault("features_snapshot", features_snapshot)
+                res["candles_df"] = df_candles
                 return res
         except Exception as scan_err:
             logger.warning("Strategy %s scan exception on %s: %s", strategy_name, symbol, scan_err, exc_info=True)
@@ -3643,6 +3644,7 @@ class UltraBotEngine:
             ml_engine = get_inference_engine()
             ml_eval = ml_engine.score_signal(
                 signal=signal,
+                candles_df=signal.get("candles_df"),
                 vix=float(self.vix or 15.0),
                 regime=str(self.current_regime or "sideways"),
                 pcr=float(getattr(self, "current_pcr", 1.0) or 1.0),
@@ -5105,8 +5107,10 @@ class UltraBotEngine:
                 # daily-risk tracker as they happened (record_pnl inside
                 # _execute_partial_booking). net_pnl now includes those
                 # legs, so record ONLY the final leg here — passing net_pnl
-                # would double-count every partial booking.
-                self.daily_risk.record_trade_result(pnl=round(pnl_amount - exit_fees, 2))
+                self.daily_risk.record_trade_result(
+                    pnl=round(pnl_amount - exit_fees, 2),
+                    gross_pnl=round(pnl_amount, 2),
+                )
                 daily_status = self.daily_risk.check_daily_limits()
                 if daily_status and not getattr(daily_status, "can_trade", True):
                     await self._route_alert("risk_event", {

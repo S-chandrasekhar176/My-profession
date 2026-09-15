@@ -32,6 +32,39 @@ def test_daily_risk_manager_ist_date_and_drawdown():
     assert status2.drawdown_limit_hit is False
 
 
+def test_daily_risk_manager_fee_breakeven_tolerance():
+    config = {"max_daily_loss_pct": 3.0, "max_consecutive_losses": 5, "fee_breakeven_tolerance_rupees": 60.0}
+    manager = DailyRiskManager(config=config, total_capital=100000.0)
+
+    # 1. Stagnation / flat time-exit: Gross +₹4, Net -₹24 (fees ₹28)
+    # With gross_pnl >= 0, trade is classified as breakeven, NOT a consecutive loss
+    manager.record_trade_result(pnl=-24.0, gross_pnl=4.0)
+    assert manager.breakeven == 1
+    assert manager.losses == 0
+    assert manager.consecutive_losses == 0
+
+    # 2. Another flat time-exit without explicit gross_pnl, but within ₹60 friction tolerance
+    manager.record_trade_result(pnl=-45.0)
+    assert manager.breakeven == 2
+    assert manager.losses == 0
+    assert manager.consecutive_losses == 0
+
+    # 3. Real market stop loss: Gross -₹288, Net -₹339 (well exceeds ₹60)
+    manager.record_trade_result(pnl=-339.0, gross_pnl=-288.0)
+    assert manager.losses == 1
+    assert manager.consecutive_losses == 1
+
+    # 4. Another real loss
+    manager.record_trade_result(pnl=-500.0)
+    assert manager.losses == 2
+    assert manager.consecutive_losses == 2
+
+    # 5. Breakeven trade does NOT increase consecutive losses
+    manager.record_trade_result(pnl=-30.0, gross_pnl=0.0)
+    assert manager.breakeven == 3
+    assert manager.consecutive_losses == 2
+
+
 @pytest.mark.asyncio
 async def test_g15_volume_liquidity_calculation():
     gate = G15VolumeLiquidity(config={"min_volume_ratio": 1.5})

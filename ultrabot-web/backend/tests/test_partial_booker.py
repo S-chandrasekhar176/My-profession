@@ -272,3 +272,51 @@ class TestEdgeCases:
         assert res.enabled is False
         assert res.current_level == 0
         assert res.trailing_sl_active is False
+
+
+class TestAdaptiveBooking:
+    def test_adaptive_levels_for_scalp(self, booker):
+        """When setup target is 0.60% (e.g. entry 100, target 100.60 < 1.0%),
+        triggers scale dynamically as fractions of target:
+        S1 = 0.60 * 0.40 = 0.24% -> 100.24
+        S2 = 0.60 * 0.60 = 0.36% -> 100.36 (Book 33%)
+        S3 = 0.60 * 0.80 = 0.48% -> 100.48 (Book 33%)
+        S4 = 0.60 * 1.00 = 0.60% -> 100.60 (Book 34%)
+        """
+        pos = make_position(entry=100.0, sl=99.5, target=100.60, quantity=100)
+        levels = booker.calculate_booking_levels(pos)
+        assert len(levels) == 4
+        assert levels[0].trigger_price == 100.24
+        assert levels[1].trigger_price == 100.36
+        assert levels[1].book_pct == 33.0
+        assert levels[2].trigger_price == 100.48
+        assert levels[2].book_pct == 33.0
+        assert levels[3].trigger_price == 100.60
+        assert levels[3].book_pct == 34.0
+
+    def test_adaptive_execution_lifecycle(self, booker):
+        """Simulate SONACOMS-like scalp: Entry 100, Target 100.60."""
+        pos = make_position(entry=100.0, sl=99.5, target=100.60, quantity=100)
+
+        # Move to +0.24% -> S1 trigger: lock BE
+        r1 = booker.check_and_book(pos, current_price=100.25)
+        assert r1.triggered_level == 1
+        assert pos.stop_loss == 100.05
+
+        # Move to +0.36% -> S2 trigger: book 33 shares
+        r2 = booker.check_and_book(pos, current_price=100.37)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 33
+        pos.quantity = 67
+
+        # Move to +0.48% -> S3 trigger: book 33 shares
+        r3 = booker.check_and_book(pos, current_price=100.49)
+        assert r3.triggered_level == 3
+        assert r3.book_qty == 33
+        pos.quantity = 34
+
+        # Move to +0.60% -> S4 trigger
+        r4 = booker.check_and_book(pos, current_price=100.60)
+        assert r4.triggered_level == 4
+        assert pos.stages_fired == [1, 2, 3, 4]
+
