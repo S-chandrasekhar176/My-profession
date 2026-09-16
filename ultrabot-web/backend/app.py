@@ -369,17 +369,34 @@ async def lifespan(app: FastAPI):
         option_recorder.start()
         app.state.option_recorder = option_recorder
 
-        # Wave-1 style task supervisor for OptionChainRecorder
+        # Wave-1 style task supervisor for OptionChainRecorder with exponential backoff & circuit-breaking
         async def _supervise_option_recorder():
+            consecutive_failures = 0
+            base_sleep = 15.0
+            max_sleep = 300.0
             while True:
                 try:
-                    await asyncio.sleep(30.0)
+                    delay = min(max_sleep, base_sleep * (2 ** min(consecutive_failures, 4)))
+                    await asyncio.sleep(delay)
                     rec = getattr(app.state, "option_recorder", None)
                     if rec and getattr(rec, "_running", False):
                         task = getattr(rec, "_fast_task", None)
                         if task is None or task.done():
-                            logger.warning("OptionChainRecorder task was dead or done; respawning...")
-                            rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
+                            consecutive_failures += 1
+                            if consecutive_failures > 10:
+                                logger.error(
+                                    "OptionChainRecorder fast poll failed %d times consecutively; pausing supervisor",
+                                    consecutive_failures,
+                                )
+                                await asyncio.sleep(300.0)
+                            else:
+                                logger.warning(
+                                    "OptionChainRecorder task was dead or done (failure %d); respawning...",
+                                    consecutive_failures,
+                                )
+                                rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
+                        else:
+                            consecutive_failures = 0
                 except asyncio.CancelledError:
                     break
                 except Exception as sup_err:
@@ -389,25 +406,30 @@ async def lifespan(app: FastAPI):
         app.state.option_recorder_supervisor = rec_supervisor_task
         logger.info("OptionChainRecorder started: active with supervisor for NIFTY/BANKNIFTY chain ingestion")
 
-        # Daily maintenance: prune old option snapshots (>14 days)
-        async def _prune_old_snapshots_task():
-            try:
-                getter = repo_getter()
-                repo = await getter if asyncio.iscoroutine(getter) else getter
+        # Recurring Daily maintenance: prune old option snapshots (>14 days) every 24 hours
+        async def _recurring_prune_old_snapshots_task():
+            while True:
                 try:
-                    if hasattr(repo, "prune_option_snapshots"):
-                        deleted = await repo.prune_option_snapshots(keep_days=14)
-                        if deleted > 0:
-                            logger.info("Daily maintenance: pruned %d option snapshots older than 14 days", deleted)
-                finally:
-                    if hasattr(repo, "close"):
-                        res = repo.close()
-                        if asyncio.iscoroutine(res):
-                            await res
-            except Exception as prune_err:
-                logger.debug("Option snapshot pruning task error: %s", prune_err)
+                    getter = repo_getter()
+                    repo = await getter if asyncio.iscoroutine(getter) else getter
+                    try:
+                        if hasattr(repo, "prune_option_snapshots"):
+                            deleted = await repo.prune_option_snapshots(keep_days=14)
+                            if deleted > 0:
+                                logger.info("Daily maintenance: pruned %d option snapshots older than 14 days", deleted)
+                    finally:
+                        if hasattr(repo, "close"):
+                            res = repo.close()
+                            if asyncio.iscoroutine(res):
+                                await res
+                except asyncio.CancelledError:
+                    break
+                except Exception as prune_err:
+                    logger.debug("Option snapshot pruning task error: %s", prune_err)
+                await asyncio.sleep(86400.0)
 
-        asyncio.create_task(_prune_old_snapshots_task())
+        prune_task = asyncio.create_task(_recurring_prune_old_snapshots_task())
+        app.state.option_prune_task = prune_task
 
     except Exception as rec_exc:
         logger.warning("OptionChainRecorder failed to start (non-fatal): %s", rec_exc)
@@ -429,6 +451,8 @@ async def lifespan(app: FastAPI):
         app.state.db_backup_job.stop()
     if hasattr(app.state, "option_recorder_supervisor") and app.state.option_recorder_supervisor:
         app.state.option_recorder_supervisor.cancel()
+    if hasattr(app.state, "option_prune_task") and app.state.option_prune_task and not app.state.option_prune_task.done():
+        app.state.option_prune_task.cancel()
     if hasattr(app.state, "option_recorder") and app.state.option_recorder:
         try:
             await app.state.option_recorder.stop()

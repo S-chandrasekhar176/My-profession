@@ -1,5 +1,21 @@
 {
   "model_type": "CalibratedLinearModel",
+  "trained_at": "2026-09-15T14:30:00+05:30",
+  "samples_count": 150,
+  "synthetic_share": 1.0,
+  "feature_names": [
+    "atr_pct",
+    "vwap_distance_pct",
+    "trend_strength",
+    "liquidity_ratio",
+    "vix",
+    "session_code",
+    "htf_trend_code",
+    "regime_code",
+    "direction_code",
+    "pcr",
+    "iv_rank"
+  ],
   "weights": [
     0.27342717488425494,
     -0.12554389134601662,

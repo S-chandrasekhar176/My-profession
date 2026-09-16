@@ -32,7 +32,7 @@ FNO_UNIVERSE_GENERATED = [
     {"symbol": "AUBANK", "name": "Aubank", "sector": "Finance", "industry": "Regional Banks", "lot_size": 1000},
     {"symbol": "AUROPHARMA", "name": "Auropharma", "sector": "Health Technology", "industry": "Pharmaceuticals: Other", "lot_size": 550},
     {"symbol": "AXISBANK", "name": "Axis Bank Ltd", "sector": "Finance", "industry": "Major Banks", "lot_size": 625},
-    {"symbol": "BAJAJ", "name": "Bajaj", "sector": "Consumer Durables", "industry": "Motor Vehicles", "lot_size": 75},
+    {"symbol": "BAJAJ-AUTO", "name": "Bajaj Auto Ltd", "sector": "Consumer Durables", "industry": "Motor Vehicles", "lot_size": 75},
     {"symbol": "BAJAJFINSV", "name": "Bajaj Finserv Ltd", "sector": "Finance", "industry": "Life/Health Insurance", "lot_size": 300},
     {"symbol": "BAJAJHLDNG", "name": "Bajajhldng", "sector": "Finance", "industry": "Financial Conglomerates", "lot_size": 75},
     {"symbol": "BAJFINANCE", "name": "Bajaj Finance Ltd", "sector": "Finance", "industry": "Finance/Rental/Leasing", "lot_size": 750},

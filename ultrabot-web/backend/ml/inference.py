@@ -114,6 +114,14 @@ class MLInferenceEngine:
         self.model.fit(X, y)
         self.model.means = self.builder.means
         self.model.stds = self.builder.stds
+        self.model.trained_at = datetime.now(IST).isoformat()
+        self.model.samples_count = len(X)
+        self.model.feature_names = list(self.builder.feature_names)
+        synthetic_count = sum(
+            1 for o in outcomes
+            if (isinstance(o, dict) and o.get("is_synthetic")) or getattr(o, "is_synthetic", False)
+        )
+        self.model.synthetic_share = round(float(synthetic_count / max(1, len(outcomes))), 4)
 
         # 3. Persist model
         if save_to_disk:
@@ -237,8 +245,10 @@ class MLInferenceEngine:
         ]
 
         now_ist = datetime.now(IST)
+        eval_id = f"eval_{int(now_ist.timestamp() * 1000)}_{uuid.uuid4().hex[:6]}"
         eval_record = {
-            "id": f"eval_{int(now_ist.timestamp() * 1000)}_{uuid.uuid4().hex[:6]}",
+            "id": eval_id,
+            "evaluation_id": eval_id,
             "timestamp": now_ist.strftime("%H:%M:%S"),
             "date": now_ist.strftime("%Y-%m-%d"),
             "symbol": sym,
@@ -270,13 +280,14 @@ class MLInferenceEngine:
         return items[:limit]
 
     def get_scorecard_metrics(self) -> Dict[str, Any]:
-        """Compute institutional scorecard metrics, drift, and calibration curve."""
+        """Compute institutional scorecard metrics, drift, and calibration curve from real validation."""
         rep = self.last_validation_report or {}
-        edge_uplift = float(rep.get("overall_uplift_pct", 12.5))
-        brier = float(rep.get("overall_brier_score", 0.165))
-        base_wr = float(rep.get("baseline_win_rate_pct", 51.2))
-        model_wr = float(rep.get("model_win_rate_pct", 63.7))
-        auc = float(rep.get("overall_roc_auc", 0.71))
+        has_val = bool(rep and "overall_uplift_pct" in rep)
+        edge_uplift = round(float(rep["overall_uplift_pct"]), 2) if has_val else None
+        brier = round(float(rep["overall_brier_score"]), 4) if has_val else None
+        base_wr = round(float(rep["baseline_win_rate_pct"]), 2) if has_val else None
+        model_wr = round(float(rep["model_win_rate_pct"]), 2) if has_val else None
+        auc = round(float(rep.get("overall_roc_auc", 0.0)), 3) if ("overall_roc_auc" in rep) else None
 
         # Recent evaluations counts
         evals = list(self.recent_evaluations)
@@ -285,34 +296,24 @@ class MLInferenceEngine:
         veto_count = sum(1 for e in evals if e.get("action") == "VETO")
         neutral_count = sum(1 for e in evals if e.get("action") == "NEUTRAL")
 
-        # Estimate avoided losses: average loss per trade ~₹1,250
-        veto_savings = veto_count * 1250.0
+        # Realized / estimated avoided losses: ₹1,250 only for actual vetoed trades
+        veto_savings = veto_count * 1250.0 if veto_count > 0 else 0.0
 
         # Drift assessment
         recent_vixes = [e["features"].get("vix", 15.0) for e in evals[:20] if "features" in e]
         avg_recent_vix = float(np.mean(recent_vixes)) if recent_vixes else 15.0
         drift_status = "HEALTHY" if avg_recent_vix < 23.0 else ("MONITOR" if avg_recent_vix < 28.0 else "HIGH_DRIFT")
 
-        # Calibration curve (predicted decile vs observed frequency)
-        curve_points = []
-        for decile in range(1, 11):
-            pred_prob = decile / 10.0
-            emp_freq = round(pred_prob * (0.92 + 0.08 * np.sin(decile)), 3)
-            curve_points.append({
-                "bin": f"{int((decile - 1) * 10)}-{int(decile * 10)}%",
-                "predicted": round(pred_prob, 2),
-                "predicted_win_rate": round(pred_prob, 2),
-                "observed": round(emp_freq, 3),
-                "actual_win_rate": round(emp_freq, 3),
-                "ideal": round(pred_prob, 2),
-            })
+        # Empirical calibration curve directly from walk-forward validation (empty if unvalidated)
+        curve_points = rep.get("calibration_curve", [])
 
         return {
+            "has_validation_data": has_val,
             "edge_uplift_pct": edge_uplift,
-            "brier_score": round(brier, 4),
+            "brier_score": brier,
             "baseline_win_rate_pct": base_wr,
             "model_win_rate_pct": model_wr,
-            "roc_auc": round(auc, 3),
+            "roc_auc": auc,
             "total_evaluations": total_evals,
             "favorable_count": favorable_count,
             "veto_count": veto_count,
@@ -341,6 +342,9 @@ class MLInferenceEngine:
             "favorable_threshold": self.favorable_threshold,
             "features_count": len(self.builder.feature_names),
             "temperature_calibration": round(float(self.model.temperature), 3),
+            "trained_at": getattr(self.model, "trained_at", None),
+            "samples_count": getattr(self.model, "samples_count", None),
+            "synthetic_share": getattr(self.model, "synthetic_share", None),
             "validation_report": self.last_validation_report,
             "scorecard": self.get_scorecard_metrics(),
         }

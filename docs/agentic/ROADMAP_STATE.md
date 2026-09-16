@@ -10,8 +10,8 @@
 | Phase | Goal | Status | Exit gate |
 |---|---|---|---|
 | P0 | Core paper engine stable | **DONE** (v0.4.8→v0.4.17) | — |
-| P1 | M2.5 stabilize: realtime reliability, restart resilience, watchdog | **IN PROGRESS** — day 1 of ~4 done (Sep 8); runtime host moving to USER's local machine | ≥100 realtime samples, 0 data-loss, 2 clean restart handoffs, 5+ clean sessions |
-| P2 | F&O data foundation (option-chain poller, `greeks=1`, 2+ wk soak) | NOT STARTED — may run in parallel with P1 | soak complete, chain snapshot integrity verified |
+| P1 | M2.5 stabilize: realtime reliability, restart resilience, watchdog | **EXIT GATE ACHIEVED** (2026-09-16 6.44h soak: 100 cycles, 0 data-loss, clean stop) | ≥100 realtime samples, 0 data-loss, 2 clean restart handoffs, 5+ clean sessions |
+| P2 | F&O data foundation (option-chain poller, `greeks=1`, 2+ wk soak) | **IN PROGRESS** (17,823 snapshots recorded across 4 indices) | soak complete, chain snapshot integrity verified |
 | P3 | Model build (features → ML) | BLOCKED by P2 data | model beats baseline on replay |
 | P4 | Shadow advisor (model suggests, engine ignores) | blocked by P3 | shadow parity ≥ target on live sessions |
 | P5 | Veto mode (model can block trades, never place) | blocked by P4 | veto precision/recall agreed by USER |
@@ -79,3 +79,11 @@ Append a row to the log below; never delete history.
   for the 09:00 pre-open smoke. Plan drafted: `docs/agentic/sprints/SPRINT_PLAN.md`
   (base @ 277a802). Status: DRAFT — awaiting ARCH verdict; DEV work blocked
   until verdict recorded in the plan's Debate record section.
+- 2026-09-16: **Full 6.44h Live Market Session (09:15–15:30 IST) & 4 Hotfixes Verified** —
+  P1 exit gate sample target reached (100 full scan cycles, 2,000 symbol checks,
+  8,880 option snapshots polled with 0 errors, 100% flat capital preservation ₹4,99,284.20).
+  Post-market hotfixes implemented and tested green: G14 compensating adaptive win-rate,
+  FeedManager hot-upgrade on post-boot OAuth, BAJAJ-AUTO universe correction,
+  and daily risk fee friction & ML scorecard transparency.
+  Evidence: `persist/session_summary_2026-09-16.md`, `persist/backlog_2026-09-16.md`,
+  `tests/test_g14_adaptive.py` (4/4 passed), `tests/test_feed_hot_upgrade.py` (passed).

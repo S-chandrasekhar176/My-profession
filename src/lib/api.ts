@@ -939,12 +939,13 @@ export interface CalibrationDecile {
 }
 
 export interface MlScorecardMetrics {
+  has_validation_data?: boolean;
   total_evaluations: number;
-  edge_uplift_pct: number;
-  brier_score: number;
-  baseline_win_rate_pct?: number;
-  model_win_rate_pct?: number;
-  roc_auc?: number;
+  edge_uplift_pct?: number | null;
+  brier_score?: number | null;
+  baseline_win_rate_pct?: number | null;
+  model_win_rate_pct?: number | null;
+  roc_auc?: number | null;
   avg_vix?: number;
   veto_savings_estimate: number;
   drift_status: 'stable' | 'moderate' | 'high' | 'HEALTHY' | string;

@@ -221,8 +221,12 @@ async def test_ml_api_endpoints():
     # 3. Train endpoint with mock repo
     mock_repo = MagicMock()
     mock_repo.get_shadow_outcomes_today = AsyncMock(return_value=[])
-    train_req = TrainModelRequest(use_synthetic_bootstrap_if_sparse=True, min_samples_threshold=40)
-    train_res = await trigger_training(train_req, repo=mock_repo, _user={})
-    assert train_res["status"] == "success"
-    assert "report" in train_res
-    assert train_res["samples_count"] >= 40
+    mock_repo.get_shadow_outcomes_history = AsyncMock(return_value=[])
+    from unittest.mock import patch
+    with patch.object(MLInferenceEngine, "save") as mock_save:
+        train_req = TrainModelRequest(use_synthetic_bootstrap_if_sparse=True, min_samples_threshold=40)
+        train_res = await trigger_training(train_req, repo=mock_repo, _user={})
+        assert train_res["status"] == "success"
+        assert "report" in train_res
+        assert train_res["samples_count"] >= 40
+        assert mock_save.called

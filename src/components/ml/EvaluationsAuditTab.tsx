@@ -100,17 +100,18 @@ export default function EvaluationsAuditTab({ evaluations, onInspectItem }: Eval
                 </td>
               </tr>
             ) : (
-              filtered.map((ev) => {
+              filtered.map((ev, index) => {
+                const evalId = ev.evaluation_id || ev.id || `eval_${index}`;
                 const isVeto = ev.action === 'VETO';
                 const isFavorable = ev.action === 'FAVORABLE';
                 const winProb = (ev.win_probability || ev.score * 100).toFixed(1);
 
                 return (
                   <tr
-                    key={ev.evaluation_id}
+                    key={evalId}
                     onClick={() =>
                       onInspectItem({
-                        id: ev.evaluation_id,
+                        id: evalId,
                         title: `Signal Evaluation: ${ev.symbol} (${ev.strategy})`,
                         category: 'NEURAL_PRIOR',
                         status: `${ev.action} (${winProb}% WR)`,
@@ -121,7 +122,7 @@ export default function EvaluationsAuditTab({ evaluations, onInspectItem }: Eval
                         purpose:
                           'Captures full feature snapshot, feature attribution weights, and Risk Gate G21 decisions for end-to-end trading auditability.',
                         whatWeKnow: [
-                          { label: 'Evaluation ID', value: ev.evaluation_id },
+                          { label: 'Evaluation ID', value: evalId },
                           { label: 'Timestamp', value: ev.timestamp },
                           { label: 'Symbol & Direction', value: `${ev.symbol} ${ev.direction}` },
                           { label: 'Strategy Trigger', value: ev.strategy },

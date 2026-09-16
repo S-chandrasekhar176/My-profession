@@ -37,6 +37,12 @@ class CalibratedLinearModel:
         self.bias: float = 0.0
         self.temperature: float = 1.0  # Calibration scaling factor
         self.is_fitted: bool = False
+        self.means: Optional[np.ndarray] = None
+        self.stds: Optional[np.ndarray] = None
+        self.trained_at: Optional[str] = None
+        self.samples_count: Optional[int] = None
+        self.synthetic_share: Optional[float] = None
+        self.feature_names: Optional[List[str]] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "CalibratedLinearModel":
         """Train logistic regression model via gradient descent."""
@@ -114,7 +120,7 @@ class CalibratedLinearModel:
         }
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize model parameters to JSON-safe dictionary."""
+        """Serialize model parameters and provenance metadata to JSON-safe dictionary."""
         d = {
             "model_type": "CalibratedLinearModel",
             "weights": self.weights.tolist() if self.weights is not None else [],
@@ -122,10 +128,18 @@ class CalibratedLinearModel:
             "temperature": float(self.temperature),
             "is_fitted": self.is_fitted,
         }
-        if hasattr(self, "means") and self.means is not None:
+        if getattr(self, "means", None) is not None:
             d["means"] = self.means.tolist() if hasattr(self.means, "tolist") else list(self.means)
-        if hasattr(self, "stds") and self.stds is not None:
+        if getattr(self, "stds", None) is not None:
             d["stds"] = self.stds.tolist() if hasattr(self.stds, "tolist") else list(self.stds)
+        if getattr(self, "trained_at", None) is not None:
+            d["trained_at"] = str(self.trained_at)
+        if getattr(self, "samples_count", None) is not None:
+            d["samples_count"] = int(self.samples_count)
+        if getattr(self, "synthetic_share", None) is not None:
+            d["synthetic_share"] = float(self.synthetic_share)
+        if getattr(self, "feature_names", None) is not None:
+            d["feature_names"] = list(self.feature_names)
         return d
 
     @classmethod
@@ -144,6 +158,10 @@ class CalibratedLinearModel:
             model.stds = np.array(d["stds"], dtype=np.float64)
         else:
             model.stds = None
+        model.trained_at = d.get("trained_at")
+        model.samples_count = d.get("samples_count")
+        model.synthetic_share = d.get("synthetic_share")
+        model.feature_names = d.get("feature_names")
         return model
 
     def save(self, filepath: str) -> None:

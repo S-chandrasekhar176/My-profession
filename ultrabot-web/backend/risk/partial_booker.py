@@ -219,7 +219,13 @@ class PartialBooker:
         # Adaptive Fraction-of-Target Mode: when setup target is smaller than Stage 2 trigger (e.g. MRF/Scalp < 1.0%)
         is_adaptive = 0.0 < target_pct < self.s2_trigger_pct
         if is_adaptive:
-            s1_pct = round(target_pct * 0.40, 3)
+            min_floor = float(self.config.get("min_s1_trigger_pct", 0.0))
+            raw_s1 = target_pct * 0.40
+            # If min_floor is configured and valid, clamp s1_pct above noise band
+            if 0.0 < min_floor < (target_pct * 0.60):
+                s1_pct = round(max(min_floor, raw_s1), 3)
+            else:
+                s1_pct = round(raw_s1, 3)
             s2_pct = round(target_pct * 0.60, 3)
             s3_pct = round(target_pct * 0.80, 3)
             s4_pct = round(target_pct, 3)

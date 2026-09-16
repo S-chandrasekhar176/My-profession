@@ -233,9 +233,8 @@ class DailyRiskManager:
         # 2. Or net loss is within fee friction tolerance (e.g. >= -fee_breakeven_tolerance_rupees, default ₹60)
         # 3. Or net pnl is exactly 0.0
         is_breakeven = False
-        if gross_pnl is not None:
-            if gross_pnl >= 0.0 and pnl <= 0.0:
-                is_breakeven = True
+        if gross_pnl is not None and gross_pnl >= 0.0 and pnl <= 0.0:
+            is_breakeven = True
         elif pnl < 0.0 and abs(pnl) <= self.fee_breakeven_tolerance_rupees:
             is_breakeven = True
 

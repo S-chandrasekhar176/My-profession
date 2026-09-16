@@ -245,6 +245,7 @@ class MLDatasetBuilder:
                 "regime_at_signal": regime,
                 "pcr": pcr,
                 "iv_rank": iv_rank,
+                "is_synthetic": True,
                 "created_at": f"2026-09-{(i % 28) + 1:02d}T10:00:00+05:30",
             })
 

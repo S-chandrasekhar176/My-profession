@@ -212,10 +212,13 @@ async def test_engine_feed_manager_preserved_on_start():
         session_manager=mock_session_mgr,
     )
 
-    await engine.start(mode="paper", broker_name="paper")
-    # Verify feed is the FeedManager object itself, NOT the dict return value of connect()
-    assert engine.feed is mock_feed
-    assert hasattr(engine.feed, "get_candles")
+    try:
+        await engine.start(mode="paper", broker_name="paper")
+        # Verify feed is the FeedManager object itself, NOT the dict return value of connect()
+        assert engine.feed is mock_feed
+        assert hasattr(engine.feed, "get_candles")
+    finally:
+        await engine.stop()
 
 
 @pytest.mark.asyncio

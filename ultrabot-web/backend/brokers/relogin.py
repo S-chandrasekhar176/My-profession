@@ -479,12 +479,45 @@ def apply_tokens_to_engine(engine: Any, broker_name: str, tokens: Dict[str, Any]
 
         # P1: Fyers feed hot-apply — works regardless of the execution broker.
         if (broker_name or "").lower() == "fyers":
+            from feeds.feed_manager import FeedManager
+
             feed = getattr(engine, "feed", None)
             primary = getattr(feed, "primary", None) if feed is not None else None
+            access_token = str(tokens.get("access_token") or "")
             if primary is not None and hasattr(primary, "apply_new_token"):
-                primary.apply_new_token(str(tokens.get("access_token") or ""))
+                primary.apply_new_token(access_token)
                 applied = True
                 logger.info("Hot-applied fresh Fyers token to the running engine's realtime feed")
+            elif isinstance(feed, FeedManager) and access_token:
+                # Hot-upgrade: Engine booted on Yahoo fallback because Fyers wasn't authenticated yet.
+                # Construct FyersCandleFeed and promote it to primary without requiring an engine restart.
+                try:
+                    from feeds.fyers_candles import FyersCandleFeed
+                    from brokers.fyers import FyersBroker
+                    from feeds.yahoo_historical import YahooHistoricalFeed
+
+                    app_id = str(tokens.get("app_id") or tokens.get("client_id") or "")
+                    if not app_id and hasattr(engine, "config"):
+                        cfg_dict = getattr(engine.config, "_raw_config", {}) or {}
+                        fyers_cfg = cfg_dict.get("fyers", {}) if isinstance(cfg_dict, dict) else {}
+                        app_id = fyers_cfg.get("app_id", "") or fyers_cfg.get("client_id", "")
+                    if not app_id:
+                        app_id = "fyers"
+
+                    def broker_factory() -> FyersBroker:
+                        return FyersBroker(app_id=app_id, access_token=access_token)
+
+                    fyers_feed = FyersCandleFeed(broker_factory=broker_factory)
+                    yahoo_backup = feed.primary if isinstance(feed.primary, YahooHistoricalFeed) else (feed.backup or YahooHistoricalFeed())
+                    feed.primary = fyers_feed
+                    feed.backup = yahoo_backup
+                    feed._using_backup = False
+                    feed._primary_failure_count = 0
+                    feed._primary_healthy = True
+                    applied = True
+                    logger.info("Hot-upgraded engine FeedManager from Yahoo fallback to Fyers 1m Realtime primary")
+                except Exception as up_exc:
+                    logger.warning("Failed to hot-upgrade FeedManager to FyersCandleFeed: %s", up_exc)
 
         return applied
     except Exception as exc:

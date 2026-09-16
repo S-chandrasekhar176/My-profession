@@ -27,6 +27,26 @@ class G14StrategyBacktest:
         self.min_profit_factor: float = float(config.get("min_backtest_profit_factor", 1.25))
         # Minimum number of real closed trades before stats are considered reliable.
         self.min_samples: int = int(config.get("min_backtest_samples", 10))
+        # Whether to allow compensating win rate for high profit factors
+        self.adaptive_win_rate: bool = bool(config.get("adaptive_win_rate", True))
+
+    def get_effective_min_win_rate(self, profit_factor: float) -> float:
+        """Dynamically scale required win rate based on verified profit factor.
+
+        In quantitative trading, strategies with high profit factors (strong reward-to-risk
+        payoff ratio) achieve positive mathematical expectancy even at lower win rates.
+        """
+        if not self.adaptive_win_rate:
+            return self.min_win_rate
+        if profit_factor >= 2.00:
+            return 0.38
+        elif profit_factor >= 1.75:
+            return 0.42
+        elif profit_factor >= 1.50:
+            return 0.48
+        elif profit_factor >= 1.35:
+            return 0.52
+        return self.min_win_rate
 
     async def check(self, signal: Any, context: Dict[str, Any]) -> GateResult:
         strategy_raw = getattr(signal, "strategy", "") or (signal.get("strategy") if isinstance(signal, dict) else "")
@@ -102,20 +122,7 @@ class G14StrategyBacktest:
             )
 
         # Evaluation against real numbers
-        if win_rate < self.min_win_rate:
-            return GateResult(
-                gate_name="G14_StrategyBacktest",
-                passed=False,
-                message=(
-                    f"Verified win rate for {strategy_raw} on {symbol} is {win_rate * 100:.1f}% "
-                    f"({sample_count} trades, {source}), below minimum requirement of "
-                    f"{self.min_win_rate * 100:.1f}% (PF: {profit_factor:.2f})"
-                ),
-                value=win_rate,
-                threshold=self.min_win_rate,
-                severity="warning",
-            )
-
+        # 1. First enforce minimum profitability: a money-losing strategy cannot pass.
         if profit_factor < self.min_profit_factor:
             return GateResult(
                 gate_name="G14_StrategyBacktest",
@@ -130,14 +137,36 @@ class G14StrategyBacktest:
                 severity="warning",
             )
 
+        # 2. Adaptive win rate: scale minimum win rate dynamically based on verified Profit Factor
+        effective_min_win_rate = self.get_effective_min_win_rate(profit_factor)
+        if win_rate < effective_min_win_rate:
+            req_msg = f"{effective_min_win_rate * 100:.1f}% (adaptive threshold for PF {profit_factor:.2f})" if effective_min_win_rate < self.min_win_rate else f"{self.min_win_rate * 100:.1f}%"
+            return GateResult(
+                gate_name="G14_StrategyBacktest",
+                passed=False,
+                message=(
+                    f"Verified win rate for {strategy_raw} on {symbol} is {win_rate * 100:.1f}% "
+                    f"({sample_count} trades, {source}), below minimum requirement of "
+                    f"{req_msg} (PF: {profit_factor:.2f})"
+                ),
+                value=win_rate,
+                threshold=effective_min_win_rate,
+                severity="warning",
+            )
+
+        adaptive_note = (
+            f" [adaptive win rate {effective_min_win_rate * 100:.1f}% met via compensating PF {profit_factor:.2f}]"
+            if effective_min_win_rate < self.min_win_rate
+            else ""
+        )
         return GateResult(
             gate_name="G14_StrategyBacktest",
             passed=True,
             message=(
                 f"Edge verified: {strategy_raw} win rate {win_rate * 100:.1f}% over "
-                f"{sample_count} trades ({source}, PF: {profit_factor:.2f} >= {self.min_profit_factor:.2f})"
+                f"{sample_count} trades ({source}, PF: {profit_factor:.2f} >= {self.min_profit_factor:.2f}){adaptive_note}"
             ),
             value=win_rate,
-            threshold=self.min_win_rate,
+            threshold=effective_min_win_rate,
             severity="info",
         )
