@@ -73,6 +73,8 @@ def to_fyers_symbol(symbol: str) -> str:
         return _INDEX_MAP[s]
     if ":" in s:
         return s  # already a Fyers-style symbol
+    if s == "NAM":
+        s = "NAM-INDIA"
     return f"NSE:{s}-EQ"
 
 

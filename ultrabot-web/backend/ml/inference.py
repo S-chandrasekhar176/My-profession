@@ -5,6 +5,7 @@ calibrated probability estimates, G21_ML advisory outputs, and explainable AI.
 """
 from collections import deque
 from datetime import datetime
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -59,6 +60,20 @@ class MLInferenceEngine:
                     self.builder.build_dataset(bootstrap_samples, fit_scaler=True)
                     self.model.means = self.builder.means
                     self.model.stds = self.builder.stds
+
+                val_path = self.model_path.parent / "m3a_validation_report.json"
+                if val_path.exists():
+                    try:
+                        with open(val_path, "r", encoding="utf-8") as vf:
+                            self.last_validation_report = json.load(vf)
+                    except Exception:
+                        pass
+                if not self.last_validation_report:
+                    bootstrap_samples = self.builder.generate_synthetic_bootstrap(n_samples=150)
+                    X, y = self.builder.build_dataset(bootstrap_samples, fit_scaler=False)
+                    validator = WalkForwardValidator(n_splits=4, min_train_size=max(20, int(len(X) * 0.3)), veto_threshold=self.veto_threshold)
+                    self.last_validation_report = validator.evaluate(X, y)
+
                 self._seed_initial_evaluations_if_empty()
                 return
             except Exception as e:
@@ -305,7 +320,13 @@ class MLInferenceEngine:
         drift_status = "HEALTHY" if avg_recent_vix < 23.0 else ("MONITOR" if avg_recent_vix < 28.0 else "HIGH_DRIFT")
 
         # Empirical calibration curve directly from walk-forward validation (empty if unvalidated)
-        curve_points = rep.get("calibration_curve", [])
+        curve_points = []
+        for pt in rep.get("calibration_curve", []):
+            pt_copy = dict(pt)
+            pt_copy.setdefault("bin", pt.get("bin_range", ""))
+            pt_copy.setdefault("predicted_win_rate", pt.get("predicted_prob", 0.0))
+            pt_copy.setdefault("actual_win_rate", pt.get("empirical_frequency", 0.0))
+            curve_points.append(pt_copy)
 
         return {
             "has_validation_data": has_val,

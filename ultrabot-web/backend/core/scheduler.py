@@ -534,12 +534,14 @@ class MarketLifecycleScheduler:
 
         repo = await self._get_repo()
         try:
-            todays_trades = await repo.get_todays_closed_trades()
-            wins = sum(1 for t in todays_trades if t.net_pnl > 0)
-            losses = sum(1 for t in todays_trades if t.net_pnl <= 0)
+            wins = sum(1 for t in todays_trades if float(t.pnl or 0.0) > 0)
+            losses = sum(1 for t in todays_trades if float(t.pnl or 0.0) < 0)
+            net_wins = sum(1 for t in todays_trades if float(t.net_pnl or 0.0) > 0)
+            net_losses = sum(1 for t in todays_trades if float(t.net_pnl or 0.0) < 0)
             total_trades = len(todays_trades)
             win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
-            total_net_pnl = sum(t.net_pnl for t in todays_trades)
+            net_win_rate = (net_wins / total_trades * 100) if total_trades > 0 else 0.0
+            total_net_pnl = round(sum(float(t.net_pnl or 0.0) for t in todays_trades), 2)
 
             # v0.4.8 HF-9: surface gross P&L, fees and best/worst in the
             # EOD alert — the previous payload carried ONLY net_pnl, so

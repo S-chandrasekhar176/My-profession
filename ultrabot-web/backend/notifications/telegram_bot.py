@@ -293,6 +293,10 @@ class TelegramBot:
         else:
             title = "⛔ STOP LOSS HIT"
         pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+        gross_pnl = float(trade.get("pnl", pnl) if isinstance(trade, dict) else (getattr(trade, "pnl", pnl) or pnl))
+        fees = float(trade.get("fees", 0.0) if isinstance(trade, dict) else (getattr(trade, "fees", 0.0) or 0.0))
+        if fees == 0.0 and abs(gross_pnl - pnl) > 0.01:
+            fees = abs(gross_pnl - pnl)
 
         lines = [
             f"<b>{title}</b>",
@@ -300,7 +304,9 @@ class TelegramBot:
             f"<b>Symbol:</b> {symbol}  |  <b>Direction:</b> {direction}",
             f"<b>Strategy:</b> {strategy}",
             f"<b>Entry:</b> ₹{entry_price:.2f} → <b>Exit:</b> ₹{exit_price:.2f}",
-            f"{pnl_emoji} <b>P&amp;L:</b> {format_currency(pnl, show_sign=True)} ({format_pct(pnl_pct)})",
+            f"📊 <b>Gross P&amp;L:</b> {format_currency(gross_pnl, show_sign=True)}",
+            f"🧾 <b>Fees &amp; Taxes:</b> {format_currency(-fees)}",
+            f"{pnl_emoji} <b>Net Realized:</b> {format_currency(pnl, show_sign=True)} ({format_pct(pnl_pct)})",
             f"<b>Time:</b> {datetime.now(IST).strftime('%H:%M:%S IST')}",
         ]
         return await self.send_message("\n".join(lines))
@@ -336,13 +342,20 @@ class TelegramBot:
             invested = entry_price * qty
             pnl_pct = (pnl / invested) * 100
 
+        gross_pnl = float(trade.get("pnl", pnl) if isinstance(trade, dict) else (getattr(trade, "pnl", pnl) or pnl))
+        fees = float(trade.get("fees", 0.0) if isinstance(trade, dict) else (getattr(trade, "fees", 0.0) or 0.0))
+        if fees == 0.0 and abs(gross_pnl - pnl) > 0.01:
+            fees = abs(gross_pnl - pnl)
+
         lines = [
             f"🎯 <b>TARGET HIT</b>",
             "",
             f"<b>Symbol:</b> {symbol}  |  <b>Direction:</b> {direction}",
             f"<b>Strategy:</b> {strategy}",
             f"<b>Entry:</b> ₹{entry_price:.2f} → <b>Exit:</b> ₹{exit_price:.2f} (Target: ₹{target:.2f})",
-            f"🟢 <b>P&amp;L:</b> {format_currency(pnl, show_sign=True)} ({format_pct(pnl_pct)})",
+            f"📊 <b>Gross P&amp;L:</b> {format_currency(gross_pnl, show_sign=True)}",
+            f"🧾 <b>Fees &amp; Taxes:</b> {format_currency(-fees)}",
+            f"🟢 <b>Net Realized:</b> {format_currency(pnl, show_sign=True)} ({format_pct(pnl_pct)})",
             f"<b>Time:</b> {datetime.now(IST).strftime('%H:%M:%S IST')}",
         ]
         return await self.send_message("\n".join(lines))
@@ -425,6 +438,7 @@ class TelegramBot:
         mode: str = "",
         broker: str = "",
         details: str = "",
+        capital: Optional[float] = None,
     ) -> bool:
         """Send an engine lifecycle status change notification."""
         st_upper = state.upper()
@@ -453,6 +467,8 @@ class TelegramBot:
             lines.append(f"<b>Mode:</b> {_esc(mode.upper())}")
         if broker:
             lines.append(f"<b>Broker:</b> {_esc(broker)}")
+        if capital is not None and capital > 0:
+            lines.append(f"<b>Capital:</b> ₹{capital:,.2f} ({mode.lower()} / broker account balance)")
         if details:
             lines.append(f"<b>Info:</b> {_esc(details)}")
         lines.append(f"<b>Time:</b> {datetime.now(IST).strftime('%H:%M:%S IST')}")
@@ -514,9 +530,11 @@ class TelegramBot:
         gross_pnl = float(daily_summary.get("gross_pnl", 0.0) or daily_summary.get("pnl", net_pnl))
         total_fees = float(daily_summary.get("total_fees", 0.0) or daily_summary.get("fees", 0.0))
         total_trades = int(daily_summary.get("total_trades", len(trades)))
-        wins = int(daily_summary.get("wins", sum(1 for t in trades if getattr(t, "net_pnl", getattr(t, "pnl", 0)) > 0 if not isinstance(t, dict)) if trades else 0))
+        wins = int(daily_summary.get("wins", sum(1 for t in trades if (getattr(t, "pnl", 0.0) if not isinstance(t, dict) else t.get("pnl", 0.0)) > 0) if trades else 0))
+        net_wins = int(daily_summary.get("net_wins", sum(1 for t in trades if (getattr(t, "net_pnl", 0.0) if not isinstance(t, dict) else t.get("net_pnl", 0.0)) > 0) if trades else 0))
         losses = int(daily_summary.get("losses", total_trades - wins))
         win_rate = float(daily_summary.get("win_rate", ((wins / total_trades) * 100 if total_trades > 0 else 0.0)))
+        net_win_rate = float(daily_summary.get("net_win_rate", ((net_wins / total_trades) * 100 if total_trades > 0 else 0.0)))
         best_trade = float(daily_summary.get("best_trade", 0.0))
         worst_trade = float(daily_summary.get("worst_trade", 0.0))
 
@@ -525,11 +543,13 @@ class TelegramBot:
         lines = [
             f"📊 <b>EOD PERFORMANCE REPORT – {today_str}</b>",
             "",
-            f"{pnl_emoji} <b>Net P&amp;L:</b> {format_currency(net_pnl, show_sign=True)}",
-            f"   Gross P&amp;L: {format_currency(gross_pnl, show_sign=True)}  |  Total Fees: {format_currency(total_fees)}",
+            f"<b>Gross P&amp;L:</b> {format_currency(gross_pnl, show_sign=True)}",
+            f"<b>Total Fees:</b> {format_currency(-total_fees)} <i>(Brokerage &amp; Taxes)</i>",
+            f"{pnl_emoji} <b>Net Realized P&amp;L:</b> {format_currency(net_pnl, show_sign=True)}",
             "",
-            f"<b>Total Trades:</b> {total_trades}  (✅ Wins: {wins}  ❌ Losses: {losses})",
-            f"<b>Win Rate:</b> {win_rate:.1f}%",
+            f"<b>Total Trades:</b> {total_trades}",
+            f"<b>Strategy Accuracy (Gross):</b> {win_rate:.1f}% ({wins}W / {losses}L)",
+            f"<b>Bottom-Line Win Rate (Net):</b> {net_win_rate:.1f}% ({net_wins}W / {total_trades - net_wins}L)",
         ]
         if best_trade != 0.0 or worst_trade != 0.0:
             lines.append(f"<b>Best Trade:</b> {format_currency(best_trade, show_sign=True)}  |  <b>Worst Trade:</b> {format_currency(worst_trade, show_sign=True)}")
@@ -540,18 +560,20 @@ class TelegramBot:
             for t in trades[:15]:
                 if isinstance(t, dict):
                     sym = _esc(t.get("symbol", "?"))
-                    t_pnl = float(t.get("net_pnl", t.get("pnl", 0.0)))
+                    t_gross = float(t.get("pnl", 0.0) or 0.0)
+                    t_fee = float(t.get("fees", 0.0) or 0.0)
+                    t_pnl = float(t.get("net_pnl", t_gross - t_fee))
                     strat = _esc(t.get("strategy", ""))
-                    status = _esc(t.get("status", ""))
                     direction = _esc(t.get("direction", ""))
                 else:
                     sym = _esc(getattr(t, "symbol", "?"))
-                    t_pnl = float(getattr(t, "net_pnl", getattr(t, "pnl", 0.0)))
+                    t_gross = float(getattr(t, "pnl", 0.0) or 0.0)
+                    t_fee = float(getattr(t, "fees", 0.0) or 0.0)
+                    t_pnl = float(getattr(t, "net_pnl", t_gross - t_fee) or 0.0)
                     strat = _esc(getattr(t, "strategy", ""))
-                    status = _esc(getattr(t, "status", ""))
                     direction = _esc(getattr(t, "direction", ""))
                 p_emoji = "🟢" if t_pnl >= 0 else "🔴"
-                lines.append(f"  • {sym} {direction} [{strat}] → {p_emoji} {format_currency(t_pnl, show_sign=True)}")
+                lines.append(f"  • {sym} {direction} [{strat}] → Gross: {format_currency(t_gross, show_sign=True)} | Fees: {format_currency(-t_fee)} | Net: {p_emoji} {format_currency(t_pnl, show_sign=True)}")
 
         lines.append("")
         lines.append("<i>Trading session closed. Have a great evening!</i>")

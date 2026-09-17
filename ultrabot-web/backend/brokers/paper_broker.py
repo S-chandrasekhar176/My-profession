@@ -8,6 +8,8 @@ from fees.nse_fee_calculator import NSEFeeCalculator
 from fees.slippage import apply_slippage
 from utils.market_utils import get_lot_size
 
+from utils.order_slicer import slice_order
+
 logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -182,6 +184,8 @@ class PaperBroker(BaseBroker):
         order_id = self._next_order_id()
         now = self._ist_now()
 
+        slices = slice_order(symbol, quantity, price, segment=segment)
+
         order = {
             "order_id": order_id,
             "symbol": symbol,
@@ -200,6 +204,9 @@ class PaperBroker(BaseBroker):
             # Slippage transparency (P2-b): always present, zero when disabled
             "slippage_bps": round(slip_bps, 2),
             "slippage_amount": slip_amount,
+            # Order Slicing transparency (freeze limit compliance)
+            "is_sliced": len(slices) > 1,
+            "slices": slices,
         }
         self.orders[order_id] = order
 
@@ -289,12 +296,15 @@ class PaperBroker(BaseBroker):
 
         return {
             "success": True,
+            "status": "FILLED",
             "order_id": order_id,
             "message": f"Paper order filled: {transaction_type} {quantity} {symbol} @ ₹{price:.2f}",
             "filled_price": round(price, 2),
             "fees": entry_fees["total"],
             "slippage_bps": round(slip_bps, 2),
             "slippage_amount": slip_amount,
+            "is_sliced": len(slices) > 1,
+            "slices": slices,
         }
 
     async def close_position(

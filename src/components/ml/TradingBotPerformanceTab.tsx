@@ -112,6 +112,10 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
     .map((c, i) => `${i === 0 ? 'M' : 'L'} ${getXPos(i)} ${getYPos(c.cumulative_net_pnl)}`)
     .join(' ');
 
+  const grossPath = curves
+    .map((c, i) => `${i === 0 ? 'M' : 'L'} ${getXPos(i)} ${getYPos(c.cumulative_gross_pnl ?? c.cumulative_net_pnl)}`)
+    .join(' ');
+
   const lossPath = curves
     .map((c, i) => `${i === 0 ? 'M' : 'L'} ${getXPos(i)} ${getYPos(c.cumulative_loss)}`)
     .join(' ');
@@ -121,6 +125,9 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
   const winTrades = data?.win_trades || 0;
   const lossTrades = data?.loss_trades || 0;
   const winRate = data?.win_rate_pct || 0;
+  const grossWinRate = data?.gross_win_rate_pct ?? winRate;
+  const grossProfit = data?.gross_profit ?? (data?.net_profit || 0);
+  const totalFees = data?.total_fees ?? 0;
 
   const donutRadius = 46;
   const donutCircumference = 2 * Math.PI * donutRadius;
@@ -241,7 +248,38 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
           </div>
 
           {/* Right Metrics & Mode Switcher */}
-          <div className="flex flex-wrap items-center gap-4 lg:gap-6">
+          <div className="flex flex-wrap items-center gap-3 lg:gap-4">
+            {/* Gross Profit Display */}
+            <div
+              className="cursor-pointer group flex flex-col items-end px-3 py-1.5 rounded-lg border border-cyan-500/20 bg-[#050811] hover:border-cyan-400 transition"
+              title="Strategy predictive gross profit before taxes and brokerage"
+            >
+              <span className="text-[10px] uppercase font-bold text-[#848e9c]">GROSS P&amp;L</span>
+              <div
+                className={`text-xl font-black tracking-tight ${
+                  grossProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                {grossProfit >= 0 ? '+' : ''}₹
+                {grossProfit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              </div>
+              <span className="text-[9px] text-emerald-400 font-mono">Strat WR: {grossWinRate}%</span>
+            </div>
+
+            {/* Total Fees Display */}
+            <div
+              className="cursor-pointer group flex flex-col items-end px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/5 hover:border-amber-400 transition"
+              title="Total round-trip brokerage, STT, exchange turnover, GST, and SEBI charges"
+            >
+              <span className="text-[10px] uppercase font-bold text-amber-400">TOTAL FEES</span>
+              <div className="text-xl font-black text-amber-400 tracking-tight">
+                -₹{totalFees ? totalFees.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00'}
+              </div>
+              <span className="text-[9px] text-[#848e9c] font-mono">
+                Drag: {grossProfit > 0 ? ((totalFees / grossProfit) * 100).toFixed(1) : '0.0'}%
+              </span>
+            </div>
+
             {/* Net Profit Display */}
             <div
               onClick={() =>
@@ -371,6 +409,10 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
                   <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_8px_#34d399]" />
                   <span>Profit Curve (Cumulative Wins)</span>
                 </div>
+                <div className="flex items-center gap-1.5 text-amber-400">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block shadow-[0_0_8px_#fbbf24]" />
+                  <span>Gross Curve (Before Fees)</span>
+                </div>
                 <div className="flex items-center gap-1.5 text-cyan-300">
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-300 inline-block shadow-[0_0_8px_#67e8f9]" />
                   <span>Net P&amp;L (Equity)</span>
@@ -476,6 +518,20 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     className="drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                  />
+                )}
+
+                {/* Gross Strategy Curve (Amber / Gold) */}
+                {curves.length > 1 && (
+                  <path
+                    d={grossPath}
+                    fill="none"
+                    stroke="#fbbf24"
+                    strokeWidth="2.0"
+                    strokeDasharray="4 2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="drop-shadow-[0_0_8px_rgba(251,191,36,0.4)]"
                   />
                 )}
 
@@ -616,20 +672,33 @@ export default function TradingBotPerformanceTab({ onInspectItem }: TradingBotPe
                       {hoveredPoint.direction} • {hoveredPoint.is_win ? 'WIN' : 'LOSS'}
                     </Badge>
                   </div>
-                  <div className="text-[11px] text-[#848e9c]">
-                    Trade P&amp;L:{' '}
-                    <strong
-                      className={hoveredPoint.trade_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}
-                    >
-                      {hoveredPoint.trade_pnl >= 0 ? '+' : ''}₹
-                      {hoveredPoint.trade_pnl.toFixed(2)}
-                    </strong>
+                  <div className="text-[11px] text-[#848e9c] space-y-0.5">
+                    <div>
+                      Net Realized:{' '}
+                      <strong
+                        className={hoveredPoint.trade_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}
+                      >
+                        {hoveredPoint.trade_pnl >= 0 ? '+' : ''}₹
+                        {hoveredPoint.trade_pnl.toFixed(2)}
+                      </strong>
+                    </div>
+                    {hoveredPoint.trade_gross_pnl !== undefined && (
+                      <div className="flex items-center justify-between gap-2 text-[10px]">
+                        <span>Gross: <strong className={hoveredPoint.trade_gross_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{hoveredPoint.trade_gross_pnl >= 0 ? '+' : ''}₹{hoveredPoint.trade_gross_pnl.toFixed(2)}</strong></span>
+                        <span>Fees: <strong className="text-amber-400">-₹{(hoveredPoint.trade_fees || 0).toFixed(2)}</strong></span>
+                      </div>
+                    )}
                   </div>
                   <div className="text-[10px] text-[#848e9c] pt-1 border-t border-cyan-500/20">
                     Cumulative Equity:{' '}
                     <strong className="text-cyan-300">
                       ₹{hoveredPoint.cumulative_net_pnl.toFixed(2)}
                     </strong>
+                    {hoveredPoint.cumulative_gross_pnl !== undefined && (
+                      <span className="text-amber-400 ml-2">
+                        (Gross: ₹{hoveredPoint.cumulative_gross_pnl.toFixed(2)})
+                      </span>
+                    )}
                   </div>
                   <div className="text-[9px] text-[#64748b]">
                     Date: {hoveredPoint.date || hoveredPoint.timestamp}

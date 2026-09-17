@@ -121,7 +121,7 @@ class TestG6NoneCheckResolution:
 # ---------------------------------------------------------------------------
 class TestG14NoneCheckResolution:
     def _gate(self):
-        return G14StrategyBacktest({"min_backtest_win_rate": 0.55, "min_backtest_samples": 10})
+        return G14StrategyBacktest({"min_backtest_win_rate": 0.55, "min_backtest_samples": 10, "adaptive_win_rate": False})
 
     @pytest.mark.asyncio
     async def test_explicit_empty_context_dict_is_preserved(self):

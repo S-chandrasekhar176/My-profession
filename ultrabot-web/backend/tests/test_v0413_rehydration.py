@@ -62,8 +62,8 @@ async def test_rehydrate_short_mirrors_sell_capital_movement():
     assert n == 1
     pos = broker.positions["BDL"]
     assert pos["direction"] == "SHORT"
-    # SELL leg: capital += invested - entry fees
-    assert broker.capital == pytest.approx(100000.0 + (1261.87 * 31 - 61.42))
+    # SELL leg locks margin (CP-07 fix): capital -= invested + entry fees
+    assert broker.capital == pytest.approx(100000.0 - (1261.87 * 31 + 61.42))
 
 
 @pytest.mark.asyncio

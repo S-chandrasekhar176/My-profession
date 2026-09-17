@@ -40,6 +40,8 @@ DEFAULT_ACTIVATION_MAP: Dict[str, Dict[str, List[str]]] = {
             "MRF",
             "VC",
             "SIC",
+            "VR",
+            "BBR",
         ],
         "reduced_size": [],
         "paused": [

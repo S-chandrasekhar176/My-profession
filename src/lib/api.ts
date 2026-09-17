@@ -982,10 +982,14 @@ export interface TradeCurvePoint {
   timestamp: string;
   date: string;
   trade_pnl: number;
+  trade_gross_pnl?: number;
+  trade_fees?: number;
   is_win: boolean;
   cumulative_profit: number;
   cumulative_loss: number;
   cumulative_net_pnl: number;
+  cumulative_gross_pnl?: number;
+  cumulative_fees?: number;
 }
 
 export interface TradeDistributionItem {
@@ -1070,6 +1074,46 @@ export interface TradesPerformanceData {
   strategy_breakdown?: StrategyPerformanceItem[];
   regime_attribution?: RegimeAttributionItem[];
   ml_alpha_advisory?: MlAlphaAdvisory;
+  gross_profit?: number;
+  total_fees?: number;
+  gross_win_rate_pct?: number;
+}
+
+export interface FeeSummaryItem {
+  timeframe: string;
+  start_date?: string;
+  end_date?: string;
+  total_trades: number;
+  gross_wins: number;
+  gross_losses: number;
+  gross_win_rate: number;
+  net_wins: number;
+  net_losses: number;
+  net_win_rate: number;
+  gross_pnl: number;
+  total_fees: number;
+  net_pnl: number;
+  best_trade?: number;
+  worst_trade?: number;
+  avg_trade_fee?: number;
+  fee_drag_pct?: number;
+}
+
+export interface MultiTimeframeFeeSummary {
+  today: FeeSummaryItem;
+  week: FeeSummaryItem;
+  month: FeeSummaryItem;
+  year: FeeSummaryItem;
+  overall: FeeSummaryItem;
+  custom?: FeeSummaryItem;
+}
+
+export async function getFeeSummary(params?: { start_date?: string; end_date?: string }): ApiResponse<{ status: string; timeframes: MultiTimeframeFeeSummary }> {
+  const { data } = await api.get('/api/trades/fees/summary', {
+    params,
+    timeout: 30_000,
+  });
+  return data;
 }
 
 export async function getTradesPerformanceCurves(source: 'ledger' | 'shadow' = 'ledger'): ApiResponse<TradesPerformanceData> {

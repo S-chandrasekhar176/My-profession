@@ -233,12 +233,16 @@ class DailyRiskManager:
         # 2. Or net loss is within fee friction tolerance (e.g. >= -fee_breakeven_tolerance_rupees, default ₹60)
         # 3. Or net pnl is exactly 0.0
         is_breakeven = False
-        if gross_pnl is not None and gross_pnl >= 0.0 and pnl <= 0.0:
+        if gross_pnl is not None and gross_pnl == 0.0:
+            is_breakeven = True
+        elif gross_pnl is not None and gross_pnl >= 0.0 and pnl <= 0.0:
+            # Market move was favorable/flat; friction/fee took net into minus
             is_breakeven = True
         elif pnl < 0.0 and abs(pnl) <= self.fee_breakeven_tolerance_rupees:
             is_breakeven = True
 
-        if pnl > 0.0 and not is_breakeven:
+        # Win classification: technical price move was profitable
+        if (gross_pnl is not None and gross_pnl > 0.0) or (pnl > 0.0):
             self.wins += 1
             self.consecutive_losses = 0
         elif is_breakeven or pnl == 0.0:

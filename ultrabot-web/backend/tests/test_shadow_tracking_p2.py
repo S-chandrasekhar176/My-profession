@@ -151,13 +151,19 @@ async def test_shadow_strategy_signal_is_diverted_not_traded():
 # ─────────────────────────────────────────────
 
 
+def _load_defaults_cfg():
+    from pathlib import Path
+    cfg_path = Path(__file__).resolve().parent.parent / "config" / "defaults.yaml"
+    with open(cfg_path) as f:
+        return yaml.safe_load(f)
+
+
 def test_defaults_yaml_shadow_list_matches_registry_exactly():
     """Every name in strategy_shadow_mode must be a real registry key
     (case-sensitive exact match) — a typo would silently never scan."""
     from strategies.registry import StrategyRegistry
 
-    with open("config/defaults.yaml") as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_defaults_cfg()
     shadow_list = cfg.get("strategy_shadow_mode", [])
 
     assert len(shadow_list) == 15, "TRS + 14 dormant strategies expected"
@@ -171,8 +177,7 @@ def test_defaults_yaml_shadow_list_matches_registry_exactly():
 
 def test_defaults_yaml_trading_strategies_never_shadowed():
     """The 6 live v2 strategies must NOT be shadow-listed (they trade)."""
-    with open("config/defaults.yaml") as f:
-        cfg = yaml.safe_load(f)
+    cfg = _load_defaults_cfg()
     shadow_list = {str(s).upper() for s in cfg.get("strategy_shadow_mode", [])}
 
     live_v2 = ["ORB", "MB", "PTC", "SIC", "VC", "MRF"]

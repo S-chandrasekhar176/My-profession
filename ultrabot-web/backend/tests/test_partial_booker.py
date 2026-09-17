@@ -320,3 +320,26 @@ class TestAdaptiveBooking:
         assert r4.triggered_level == 4
         assert pos.stages_fired == [1, 2, 3, 4]
 
+    def test_micro_quantity_exemption(self, booker):
+        """When position size is small (< 10 shares, e.g. Maruti 3 shares),
+        skip partial exit orders (book_qty == 0) to prevent fee stacking,
+        while still ratcheting the trailing stop loss forward.
+        """
+        pos = make_position(entry=10000.0, sl=9900.0, quantity=3)
+
+        # Stage 1: Breakeven lock (+0.5% at 10050)
+        r1 = booker.check_and_book(pos, current_price=10050.0)
+        assert r1.triggered_level == 1
+        assert r1.book_qty == 0
+        assert pos.stop_loss == 10005.0
+
+        # Stage 2: First Book (+1.0% at 10100.0) -> exempt from exit orders!
+        r2 = booker.check_and_book(pos, current_price=10100.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 0  # No order placed!
+        assert r2.book_pct == 0.0
+        assert r2.remaining_qty == 3
+        assert r2.trailing_sl_active is True
+        assert r2.current_trailing_sl == 10070.0  # Trailing SL still advanced!
+        assert pos.stop_loss == 10070.0
+

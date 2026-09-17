@@ -21,6 +21,7 @@ class PartialBooker:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         cfg = config or {}
+        self.config = cfg
         self.enabled: bool = cfg.get("enabled", True)
 
         # Brokerage / slippage buffer for Stage 1 breakeven lock (default 0.05%)
@@ -49,6 +50,9 @@ class PartialBooker:
 
         self.trailing_method: str = cfg.get("trailing_sl_method", "peak_trail")
         self.trailing_step_pct: float = float(cfg.get("trailing_step_pct", 0.5))
+
+        # Micro-quantity exemption: skip order splits if position is small to prevent fee drag
+        self.min_partial_qty: int = int(cfg.get("min_partial_qty", 10))
 
     def _normalize_position(
         self,
@@ -367,23 +371,31 @@ class PartialBooker:
         elif move_pct >= lvl2.trigger_pct and 2 not in stages_fired:
             triggered_level = 2
             stage_name = lvl2.stage_name
-            book_pct = lvl2.book_pct
-            book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
-            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
-            if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
-                book_qty = 1
-            book_qty = min(book_qty, current_qty)
+            if initial_qty < self.min_partial_qty:
+                book_pct = 0.0
+                book_qty = 0
+            else:
+                book_pct = lvl2.book_pct
+                book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
+                current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+                if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                    book_qty = 1
+                book_qty = min(book_qty, current_qty)
             stages_fired.append(2)
 
         elif move_pct >= lvl3.trigger_pct and 3 not in stages_fired:
             triggered_level = 3
             stage_name = lvl3.stage_name
-            book_pct = lvl3.book_pct
-            book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
-            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
-            if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
-                book_qty = 1
-            book_qty = min(book_qty, current_qty)
+            if initial_qty < self.min_partial_qty:
+                book_pct = 0.0
+                book_qty = 0
+            else:
+                book_pct = lvl3.book_pct
+                book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
+                current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+                if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                    book_qty = 1
+                book_qty = min(book_qty, current_qty)
             stages_fired.append(3)
 
         elif move_pct >= lvl4.trigger_pct and 4 not in stages_fired:

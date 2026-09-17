@@ -28,6 +28,8 @@ class PositionSizer:
     def __init__(self, config: Dict[str, Any], capital_config: Dict[str, Any]):
         self.config = config or {}
         self.capital_config = capital_config or {}
+        # Sizing method ('dynamic_kelly' or 'risk_based')
+        self.method: str = str(self.config.get("method", "dynamic_kelly"))
 
         # Position sizing parameters (tightened Kelly cap default: 8% = 0.08)
         self.kelly_min: float = float(self.config.get("kelly_min_fraction", 0.02))
@@ -192,30 +194,53 @@ class PositionSizer:
 
         is_equity = not is_fno
 
-        # Preliminary quantity from Kelly position size
-        quantity, lot_size = self._to_quantity(symbol, position_size, entry_price, is_fno=is_fno)
-
         notes_parts: list = []
 
-        # 7. HARD CAPITAL-RISK FLOOR (hard_risk_pct Max Capital Risk per Trade)
-        # Position size must NEVER risk more than hard_risk_pct (default 1.0%)
-        # of total capital based on |entry_price - sl_price| x quantity.
+        # 7. HARD CAPITAL-RISK FLOOR & SIZING
         risk_per_unit = abs(entry_price - sl_price) if entry_price > 0 and sl_price > 0 else 0.0
         max_allowed_risk_rupees = self.total_capital * (self.hard_risk_pct / 100.0)
 
-        if risk_per_unit > 0 and entry_price > 0:
-            max_qty_by_risk = int(max_allowed_risk_rupees / risk_per_unit)
-            if is_fno and lot_size and lot_size > 0:
-                # Lot-adjusted floor cap
-                max_qty_by_risk = (max_qty_by_risk // lot_size) * lot_size
-            
-            if quantity > max_qty_by_risk:
+        if self.method == "risk_based":
+            # Risk-Based Sizing: size directly from risk budget (|entry - sl| distance)
+            risk_scale = (adjusted_fraction / self.kelly_max) if self.kelly_max > 0 else 1.0
+            target_risk_rupees = max_allowed_risk_rupees * min(1.0, max(0.2, risk_scale))
+
+            lot_size = get_lot_size(symbol) if is_fno else None
+            if risk_per_unit > 0 and entry_price > 0:
+                raw_risk_qty = int(target_risk_rupees / risk_per_unit)
+                max_capital_for_pos = min(actual_usable, max_single)
+                max_qty_by_capital = int(max_capital_for_pos / entry_price)
+
+                target_qty = min(raw_risk_qty, max_qty_by_capital)
+                if is_fno and lot_size and lot_size > 0:
+                    quantity = (target_qty // lot_size) * lot_size
+                else:
+                    quantity = max(0, target_qty)
+
                 notes_parts.append(
-                    f"Quantity capped from {quantity} to {max_qty_by_risk} by "
-                    f"{self.hard_risk_pct:g}% hard capital-risk floor "
-                    f"(Risk ₹{risk_per_unit * quantity:,.0f} -> ₹{risk_per_unit * max_qty_by_risk:,.0f} <= ₹{max_allowed_risk_rupees:,.0f})"
+                    f"Risk-based sizing: allocated {quantity} shares (Target Risk: ₹{target_risk_rupees:,.0f} / actual risk: ₹{risk_per_unit * quantity:,.0f})"
                 )
-                quantity = max(0, max_qty_by_risk)
+            else:
+                quantity, lot_size = self._to_quantity(symbol, position_size, entry_price, is_fno=is_fno)
+        else:
+            # Preliminary quantity from Kelly position size
+            quantity, lot_size = self._to_quantity(symbol, position_size, entry_price, is_fno=is_fno)
+
+            # Position size must NEVER risk more than hard_risk_pct (default 1.0%)
+            # of total capital based on |entry_price - sl_price| x quantity.
+            if risk_per_unit > 0 and entry_price > 0:
+                max_qty_by_risk = int(max_allowed_risk_rupees / risk_per_unit)
+                if is_fno and lot_size and lot_size > 0:
+                    # Lot-adjusted floor cap
+                    max_qty_by_risk = (max_qty_by_risk // lot_size) * lot_size
+
+                if quantity > max_qty_by_risk:
+                    notes_parts.append(
+                        f"Quantity capped from {quantity} to {max_qty_by_risk} by "
+                        f"{self.hard_risk_pct:g}% hard capital-risk floor "
+                        f"(Risk ₹{risk_per_unit * quantity:,.0f} -> ₹{risk_per_unit * max_qty_by_risk:,.0f} <= ₹{max_allowed_risk_rupees:,.0f})"
+                    )
+                    quantity = max(0, max_qty_by_risk)
 
         # 8. Minimum Position Size Check
         if entry_price > 0 and quantity > 0:
@@ -244,7 +269,7 @@ class PositionSizer:
         risk_pct = (risk_amount / self.total_capital * 100.0) if self.total_capital > 0 else 0.0
 
         return SizingResult(
-            method="dynamic_kelly",
+            method=self.method,
             raw_fraction=raw_fraction,
             adjusted_fraction=adjusted_fraction,
             confidence_multiplier=conf_multiplier,

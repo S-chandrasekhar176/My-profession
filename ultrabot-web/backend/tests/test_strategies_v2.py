@@ -14,8 +14,8 @@ def test_strategy_registry_discovery_v2():
     registry.discover()
     strategies = registry.get_all()
 
-    # Verify all 7 V2 strategies are registered under their exact acronyms
-    expected_v2_keys = ["ORB", "MB", "PTC", "VC", "SIC", "MRF", "TRS"]
+    # Verify all 9 V2 strategies are registered under their exact acronyms
+    expected_v2_keys = ["ORB", "MB", "PTC", "VC", "SIC", "MRF", "TRS", "VR", "BBR"]
     for key in expected_v2_keys:
         assert key in strategies, f"V2 strategy {key} should be registered in StrategyRegistry"
         strat = strategies[key]
@@ -100,7 +100,7 @@ async def test_v2_strategies_scan_interface():
         "volume": np.random.randint(1000, 5000, size=50),
     }, index=dates)
 
-    expected_v2_keys = ["ORB", "MB", "PTC", "VC", "SIC", "MRF", "TRS"]
+    expected_v2_keys = ["ORB", "MB", "PTC", "VC", "SIC", "MRF", "TRS", "VR", "BBR"]
     for key in expected_v2_keys:
         strat = registry.get(key)
         assert strat is not None

@@ -24,10 +24,13 @@ async def get_option_snapshots(
 ) -> Dict[str, Any]:
     """Retrieve recorded historical option chain snapshots."""
     try:
+        clean_expiry = expiry if isinstance(expiry, str) else None
+        clean_limit = limit if isinstance(limit, int) else 20
+        clean_symbol = symbol if isinstance(symbol, str) else "NIFTY"
         snapshots = await repo.get_latest_option_snapshots(
-            underlying_symbol=symbol,
-            limit=limit,
-            expiry=expiry,
+            underlying_symbol=clean_symbol,
+            limit=clean_limit,
+            expiry=clean_expiry,
         )
         items = []
         for s in snapshots:

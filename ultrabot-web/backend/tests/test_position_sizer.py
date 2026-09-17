@@ -165,3 +165,24 @@ class TestPositionSizerBasic:
         ctx = {"vix": 14.0, "current_drawdown_pct": 1.0, "available_capital": 100000.0}
         result = sizer.calculate(signal, ctx)
         assert result.raw_fraction == 0.08
+
+    def test_risk_based_sizing_method(self):
+        """Verify method='risk_based' sizes quantity directly from the monetary risk budget
+        divided by the stop-loss distance, capped by maximum per-position capital.
+        """
+        cfg = dict(SIZING_CONFIG)
+        cfg["method"] = "risk_based"
+        # 1% hard risk on 100,000 = 1,000 INR risk budget
+        sizer = PositionSizer(cfg, CAPITAL_CONFIG)
+        # Entry 1000, SL 980 -> risk_per_unit = 20 INR
+        # Expected quantity = 1000 / 20 = 50 shares
+        # Value = 50 * 1000 = 50,000 (capped by max_per_position_pct 25% = 25,000 -> 25 shares)
+        signal = make_signal(symbol="INFY", confidence=0.85, entry_price=1000.0, sl_price=980.0, segment="EQ")
+        ctx = {"vix": 12.0, "current_drawdown_pct": 1.0, "available_capital": 100000.0}
+        result = sizer.calculate(signal, ctx)
+        assert result.method == "risk_based"
+        # 25,000 max single capital / 1000 = 25 shares
+        assert result.quantity == 25
+        assert result.position_size == 25000.0
+        assert result.risk_amount == 25 * 20.0  # 500 INR <= 1000 hard risk
+        assert result.risk_pct <= 1.0

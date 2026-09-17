@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { usePositions, useTrades } from '@/hooks/useApi';
 import { clearAllPaperData } from '@/lib/tradeExecution';
-import { modifyPositionStopLoss, modifyPositionTarget } from '@/lib/api';
+import { modifyPositionStopLoss, modifyPositionTarget, getFeeSummary, type MultiTimeframeFeeSummary, type FeeSummaryItem } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -685,6 +685,26 @@ function HistoryTab({
   const [strategyFilter, setStrategyFilter] = useState('All Strategies');
   const [symbolFilter, setSymbolFilter] = useState('');
   const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
+  const [feeTimeframe, setFeeTimeframe] = useState<'today' | 'week' | 'month' | 'year' | 'overall' | 'custom'>('today');
+  const [feeSummary, setFeeSummary] = useState<MultiTimeframeFeeSummary | null>(null);
+
+  const fetchFees = useCallback(async () => {
+    try {
+      const res = await getFeeSummary({
+        start_date: dateFrom || undefined,
+        end_date: dateTo || undefined,
+      });
+      if (res?.timeframes) {
+        setFeeSummary(res.timeframes);
+      }
+    } catch (err) {
+      console.warn('Failed to load fee summary:', err);
+    }
+  }, [dateFrom, dateTo]);
+
+  useEffect(() => {
+    fetchFees();
+  }, [fetchFees, resetSignal]);
 
   const filteredTrades = useMemo(() => {
     return trades.filter((t) => {
@@ -699,8 +719,9 @@ function HistoryTab({
       }
       if (strategyFilter !== 'All Strategies' && t.strategy !== strategyFilter) return false;
       if (symbolFilter && !t.symbol.toLowerCase().includes(symbolFilter.toLowerCase())) return false;
-      if (resultFilter === 'win' && t.netPnl < 0) return false;
-      if (resultFilter === 'loss' && t.netPnl >= 0) return false;
+      // Win/loss marking based on Gross P&L without fees
+      if (resultFilter === 'win' && t.grossPnl <= 0) return false;
+      if (resultFilter === 'loss' && t.grossPnl > 0) return false;
       return true;
     });
   }, [trades, dateFrom, dateTo, strategyFilter, symbolFilter, resultFilter]);
@@ -714,10 +735,25 @@ function HistoryTab({
 
   const totals = useMemo(() => {
     const totalTrades = filteredTrades.length;
-    const totalPnl = filteredTrades.reduce((sum, t) => sum + t.netPnl, 0);
-    const wins = filteredTrades.filter((t) => t.netPnl > 0).length;
-    const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-    return { totalTrades, totalPnl, winRate };
+    const grossPnl = filteredTrades.reduce((sum, t) => sum + (t.grossPnl || 0), 0);
+    const totalFees = filteredTrades.reduce((sum, t) => sum + (t.fees || 0), 0);
+    const totalPnl = filteredTrades.reduce((sum, t) => sum + (t.netPnl || 0), 0);
+    const grossWins = filteredTrades.filter((t) => (t.grossPnl || 0) > 0).length;
+    const netWins = filteredTrades.filter((t) => (t.netPnl || 0) > 0).length;
+    const grossWinRate = totalTrades > 0 ? (grossWins / totalTrades) * 100 : 0;
+    const winRate = totalTrades > 0 ? (netWins / totalTrades) * 100 : 0;
+    const feeDragPct = grossPnl > 0 ? (totalFees / grossPnl) * 100 : 0;
+    return {
+      totalTrades,
+      grossPnl,
+      totalFees,
+      totalPnl,
+      grossWins,
+      netWins,
+      grossWinRate,
+      winRate,
+      feeDragPct,
+    };
   }, [filteredTrades]);
 
   const handleApplyFilters = () => {
@@ -768,6 +804,104 @@ function HistoryTab({
 
   return (
     <div className="space-y-4">
+      {/* Institutional Fee Awareness & Multi-Timeframe Audit Card */}
+      <Card className="bg-ub-surface border-ub-border overflow-hidden">
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-ub-border/60 pb-3">
+            <div className="flex items-center gap-2">
+              <div className="h-7 w-7 rounded bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-xs">
+                ₹
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-ub-text-primary flex items-center gap-2">
+                  Institutional Fee & Transaction Drag Audit
+                  <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/30">
+                    Live Taxes &amp; Brokerage
+                  </Badge>
+                </h3>
+                <p className="text-xs text-ub-text-muted">
+                  Multi-timeframe awareness of round-trip brokerage, STT, exchange turnover, GST, and stamp duty
+                </p>
+              </div>
+            </div>
+
+            {/* Timeframe Selector Pills */}
+            <div className="flex items-center gap-1 bg-ub-background/80 p-1 rounded-lg border border-ub-border">
+              {(['today', 'week', 'month', 'year', 'overall', 'custom'] as const).map((tf) => (
+                <button
+                  key={tf}
+                  onClick={() => setFeeTimeframe(tf)}
+                  className={`px-2.5 py-1 text-xs rounded-md font-medium transition-all ${
+                    feeTimeframe === tf
+                      ? 'bg-ub-accent text-ub-background font-bold shadow-sm'
+                      : 'text-ub-text-muted hover:text-ub-text-primary hover:bg-ub-surface'
+                  }`}
+                >
+                  {tf === 'today' ? 'Today' : tf === 'week' ? 'Week' : tf === 'month' ? 'Month' : tf === 'year' ? 'Year' : tf === 'overall' ? 'Overall' : 'Custom'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Metrics Grid for selected timeframe */}
+          {(() => {
+            const current = feeSummary ? (feeSummary[feeTimeframe] || feeSummary.today) : null;
+            const gross = current ? current.gross_pnl : totals.grossPnl;
+            const fees = current ? current.total_fees : totals.totalFees;
+            const net = current ? current.net_pnl : totals.totalPnl;
+            const grossWr = current ? current.gross_win_rate : totals.grossWinRate;
+            const netWr = current ? current.net_win_rate : totals.winRate;
+            const count = current ? current.total_trades : totals.totalTrades;
+            const drag = current ? current.fee_drag_pct : totals.feeDragPct;
+            const avgFee = (current && current.avg_trade_fee !== undefined ? current.avg_trade_fee : (count > 0 ? totals.totalFees / count : 0)) || 0;
+
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3 pt-1">
+                <div className="p-3 rounded-lg bg-ub-background/60 border border-ub-border/50">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-ub-text-muted">Strategy Gross P&amp;L</span>
+                  <p className={`text-base sm:text-lg font-mono font-bold mt-1 ${gross >= 0 ? 'text-ub-profit' : 'text-ub-loss'}`}>
+                    {gross >= 0 ? '+' : ''}{INR(gross)}
+                  </p>
+                  <span className="text-[11px] text-ub-text-muted">Strat WR: <strong className="text-ub-text-primary">{grossWr.toFixed(0)}%</strong> ({count} trades)</span>
+                </div>
+
+                <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-amber-400">Total Fees Paid</span>
+                  <p className="text-base sm:text-lg font-mono font-bold text-amber-400 mt-1">
+                    -{INR(fees)}
+                  </p>
+                  <span className="text-[11px] text-ub-text-muted">Avg: ₹{avgFee.toFixed(1)} / trade</span>
+                </div>
+
+                <div className="p-3 rounded-lg bg-ub-background/60 border border-ub-border/50">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-ub-text-muted">Net Realized P&amp;L</span>
+                  <p className={`text-base sm:text-lg font-mono font-bold mt-1 ${net >= 0 ? 'text-ub-profit' : 'text-ub-loss'}`}>
+                    {net >= 0 ? '+' : ''}{INR(net)}
+                  </p>
+                  <span className="text-[11px] text-ub-text-muted">Net WR: <strong className="text-ub-text-primary">{netWr.toFixed(0)}%</strong></span>
+                </div>
+
+                <div className="p-3 rounded-lg bg-ub-background/60 border border-ub-border/50">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-ub-text-muted">Fee Drag %</span>
+                  <p className="text-base sm:text-lg font-mono font-bold text-cyan-400 mt-1">
+                    {drag ? `${drag.toFixed(1)}%` : '0.0%'}
+                  </p>
+                  <span className="text-[11px] text-ub-text-muted">of gross absorbed by fees</span>
+                </div>
+
+                <div className="col-span-2 sm:col-span-4 lg:col-span-1 p-3 rounded-lg bg-ub-background/60 border border-ub-border/50 flex flex-col justify-center">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-ub-text-muted">Fee Hurdle Floor</span>
+                  <p className="text-xs font-semibold text-emerald-400 mt-1 flex items-center gap-1">
+                    <Check className="h-3.5 w-3.5" /> 2.5×–3.0× Floor Active
+                  </p>
+                  <span className="text-[10px] text-ub-text-muted">Prevents entry if reward &lt; ₹150–₹200</span>
+                </div>
+              </div>
+            );
+          })()}
+        </CardContent>
+      </Card>
+
       {/* Filter Bar */}
       <Card className="bg-ub-surface border-ub-border">
         <CardContent className="p-4">
@@ -1011,29 +1145,39 @@ function HistoryTab({
 
           {/* Footer: Summary + Pagination + Export */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 px-4 py-3 border-t border-ub-border">
-            <div className="flex flex-wrap items-center gap-4 text-sm">
+            <div className="flex flex-wrap items-center gap-3 text-xs sm:text-sm">
               <div className="text-ub-text-muted">
-                Total Trades:{' '}
-                <span className="font-semibold text-ub-text-primary">{totals.totalTrades}</span>
+                Trades: <span className="font-semibold text-ub-text-primary">{totals.totalTrades}</span>
               </div>
               <Separator orientation="vertical" className="h-4 bg-ub-border" />
               <div className="text-ub-text-muted">
-                Total P&L:{' '}
-                <span
-                  className={`font-bold ${totals.totalPnl >= 0 ? 'text-ub-profit' : 'text-ub-loss'
-                    }`}
-                >
-                  {totals.totalPnl >= 0 ? '+' : ''}
-                  {INR(totals.totalPnl)}
+                Gross:{' '}
+                <span className={`font-bold ${totals.grossPnl >= 0 ? 'text-ub-profit' : 'text-ub-loss'}`}>
+                  {totals.grossPnl >= 0 ? '+' : ''}{INR(totals.grossPnl)}
                 </span>
               </div>
               <Separator orientation="vertical" className="h-4 bg-ub-border" />
               <div className="text-ub-text-muted">
-                Win Rate:{' '}
-                <span
-                  className={`font-bold ${totals.winRate >= 50 ? 'text-ub-profit' : 'text-ub-loss'
-                    }`}
-                >
+                Fees: <span className="font-bold text-amber-400">-{INR(totals.totalFees)}</span>
+              </div>
+              <Separator orientation="vertical" className="h-4 bg-ub-border" />
+              <div className="text-ub-text-muted">
+                Net:{' '}
+                <span className={`font-bold ${totals.totalPnl >= 0 ? 'text-ub-profit' : 'text-ub-loss'}`}>
+                  {totals.totalPnl >= 0 ? '+' : ''}{INR(totals.totalPnl)}
+                </span>
+              </div>
+              <Separator orientation="vertical" className="h-4 bg-ub-border" />
+              <div className="text-ub-text-muted" title="Strategy predictive win rate (Gross P&L > 0)">
+                Strat WR:{' '}
+                <span className="font-bold text-ub-profit">
+                  {totals.grossWinRate.toFixed(1)}%
+                </span>
+              </div>
+              <Separator orientation="vertical" className="h-4 bg-ub-border" />
+              <div className="text-ub-text-muted" title="Realized win rate after fees (Net P&L > 0)">
+                Net WR:{' '}
+                <span className={`font-bold ${totals.winRate >= 50 ? 'text-ub-profit' : 'text-ub-loss'}`}>
                   {totals.winRate.toFixed(1)}%
                 </span>
               </div>

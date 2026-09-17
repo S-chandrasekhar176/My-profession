@@ -76,6 +76,8 @@ class StrategyRegistry:
             ".v2.sic",
             ".v2.mrf",
             ".v2.trs",
+            ".v2.vr",
+            ".v2.bbr",
             # Core Strategies
             ".core.breakout",
             ".core.mean_reversion",

@@ -285,21 +285,131 @@ class Repository:
         # trade and broke gross − fees = net on the dashboard.
         total_fees = sum((t.fees or 0.0) for t in closed)
         net_pnl = sum((t.net_pnl or 0.0) for t in closed)
-        wins = sum(1 for t in closed if t.net_pnl > 0)
-        losses = sum(1 for t in closed if t.net_pnl < 0)
+        gross_wins = sum(1 for t in closed if (t.pnl or 0.0) > 0)
+        gross_losses = sum(1 for t in closed if (t.pnl or 0.0) < 0)
+        net_wins = sum(1 for t in closed if (t.net_pnl or 0.0) > 0)
+        net_losses = sum(1 for t in closed if (t.net_pnl or 0.0) < 0)
         total = len(closed)
         return {
             "date": today,
             "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": (wins / total * 100) if total > 0 else 0.0,
+            "wins": gross_wins,
+            "losses": gross_losses,
+            "win_rate": round(gross_wins / total * 100, 2) if total > 0 else 0.0,
+            "net_wins": net_wins,
+            "net_losses": net_losses,
+            "net_win_rate": round(net_wins / total * 100, 2) if total > 0 else 0.0,
             "gross_pnl": round(gross_pnl, 2),
             "total_fees": round(total_fees, 2),
             "net_pnl": round(net_pnl, 2),
             "best_trade": round(max((t.net_pnl for t in closed), default=0), 2),
             "worst_trade": round(min((t.net_pnl for t in closed), default=0), 2),
         }
+
+    async def get_multi_timeframe_fee_summary(
+        self,
+        custom_start: Optional[str] = None,
+        custom_end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate Gross P&L, Total Fees, and Net P&L across multiple timeframes:
+        today, week, month, year, overall, and custom range.
+        """
+        stmt = (
+            select(Trade)
+            .where(Trade.status == "CLOSED")
+            .order_by(Trade.exit_time.desc())
+        )
+        res = await self.session.execute(stmt)
+        all_closed: List[Trade] = list(res.scalars().all())
+
+        now_dt = datetime.now(IST)
+        today_date = now_dt.date()
+        today_iso = today_date.isoformat()
+        week_start_iso = (today_date - timedelta(days=today_date.weekday())).isoformat()
+        month_start_iso = today_date.replace(day=1).isoformat()
+        year_start_iso = today_date.replace(month=1, day=1).isoformat()
+
+        def _compute_bucket(trades: List[Trade], label: str, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
+            total = len(trades)
+            if total == 0:
+                return {
+                    "timeframe": label,
+                    "start_date": start,
+                    "end_date": end,
+                    "total_trades": 0,
+                    "gross_wins": 0,
+                    "gross_losses": 0,
+                    "gross_win_rate": 0.0,
+                    "net_wins": 0,
+                    "net_losses": 0,
+                    "net_win_rate": 0.0,
+                    "gross_pnl": 0.0,
+                    "total_fees": 0.0,
+                    "net_pnl": 0.0,
+                    "best_trade": 0.0,
+                    "worst_trade": 0.0,
+                    "avg_trade_fee": 0.0,
+                    "fee_drag_pct": 0.0,
+                }
+            gross_pnl = sum(float(t.pnl or 0.0) for t in trades)
+            total_fees = sum(float(t.fees or 0.0) for t in trades)
+            net_pnl = sum(float(t.net_pnl or 0.0) for t in trades)
+            gross_wins = sum(1 for t in trades if (t.pnl or 0.0) > 0)
+            gross_losses = sum(1 for t in trades if (t.pnl or 0.0) < 0)
+            net_wins = sum(1 for t in trades if (t.net_pnl or 0.0) > 0)
+            net_losses = sum(1 for t in trades if (t.net_pnl or 0.0) < 0)
+            best_trade = max((float(t.net_pnl or 0.0) for t in trades), default=0.0)
+            worst_trade = min((float(t.net_pnl or 0.0) for t in trades), default=0.0)
+            avg_fee = total_fees / total if total > 0 else 0.0
+            fee_drag = (total_fees / gross_pnl * 100.0) if gross_pnl > 0 else 0.0
+
+            return {
+                "timeframe": label,
+                "start_date": start,
+                "end_date": end,
+                "total_trades": total,
+                "gross_wins": gross_wins,
+                "gross_losses": gross_losses,
+                "gross_win_rate": round(gross_wins / total * 100.0, 1),
+                "net_wins": net_wins,
+                "net_losses": net_losses,
+                "net_win_rate": round(net_wins / total * 100.0, 1),
+                "gross_pnl": round(gross_pnl, 2),
+                "total_fees": round(total_fees, 2),
+                "net_pnl": round(net_pnl, 2),
+                "best_trade": round(best_trade, 2),
+                "worst_trade": round(worst_trade, 2),
+                "avg_trade_fee": round(avg_fee, 2),
+                "fee_drag_pct": round(fee_drag, 1),
+            }
+
+        def _get_trade_date(t: Trade) -> str:
+            ts = t.exit_time or t.entry_time or ""
+            return ts[:10] if len(ts) >= 10 else ""
+
+        today_trades = [t for t in all_closed if _get_trade_date(t) == today_iso]
+        week_trades = [t for t in all_closed if _get_trade_date(t) >= week_start_iso]
+        month_trades = [t for t in all_closed if _get_trade_date(t) >= month_start_iso]
+        year_trades = [t for t in all_closed if _get_trade_date(t) >= year_start_iso]
+
+        summary = {
+            "today": _compute_bucket(today_trades, "today", today_iso, today_iso),
+            "week": _compute_bucket(week_trades, "week", week_start_iso, today_iso),
+            "month": _compute_bucket(month_trades, "month", month_start_iso, today_iso),
+            "year": _compute_bucket(year_trades, "year", year_start_iso, today_iso),
+            "overall": _compute_bucket(all_closed, "overall", None, today_iso),
+        }
+
+        if custom_start or custom_end:
+            c_start = custom_start or "1970-01-01"
+            c_end = custom_end or today_iso
+            custom_trades = [
+                t for t in all_closed
+                if c_start <= _get_trade_date(t) <= c_end
+            ]
+            summary["custom"] = _compute_bucket(custom_trades, "custom", custom_start, custom_end)
+
+        return summary
 
     # ────────────────────────────────────────
     # SIGNALS
@@ -581,25 +691,27 @@ class Repository:
                 "source": "trades_ledger",
             }
 
-        wins = [t for t in trades if float(t.net_pnl or 0.0) > 0]
-        losses = [t for t in trades if float(t.net_pnl or 0.0) < 0]
-        breakeven = total - len(wins) - len(losses)
+        gross_wins = [t for t in trades if float(t.pnl or 0.0) > 0]
+        gross_losses = [t for t in trades if float(t.pnl or 0.0) < 0]
+        net_wins = [t for t in trades if float(t.net_pnl or 0.0) > 0]
+        net_losses = [t for t in trades if float(t.net_pnl or 0.0) < 0]
+        breakeven = total - len(gross_wins) - len(gross_losses)
 
-        gross_win = sum(float(t.net_pnl or 0.0) for t in wins)
-        gross_loss = abs(sum(float(t.net_pnl or 0.0) for t in losses))
+        gross_win_amount = sum(float(t.pnl or 0.0) for t in gross_wins)
+        gross_loss_amount = abs(sum(float(t.pnl or 0.0) for t in gross_losses))
         total_pnl = sum(float(t.net_pnl or 0.0) for t in trades)
 
         holdings = [float(t.holding_duration_seconds or 0.0) for t in trades if t.holding_duration_seconds]
 
-        # Consecutive win/loss streaks over the ordered ledger
+        # Consecutive win/loss streaks over the ordered ledger (based on gross price movement)
         max_con_wins = max_con_losses = 0
         cur_wins = cur_losses = 0
         for t in trades:
-            pnl = float(t.net_pnl or 0.0)
-            if pnl > 0:
+            pnl_val = float(t.pnl or 0.0)
+            if pnl_val > 0:
                 cur_wins += 1
                 cur_losses = 0
-            elif pnl < 0:
+            elif pnl_val < 0:
                 cur_losses += 1
                 cur_wins = 0
             else:
@@ -609,14 +721,17 @@ class Repository:
 
         return {
             "total_trades": total,
-            "wins": len(wins),
-            "losses": len(losses),
+            "wins": len(gross_wins),
+            "losses": len(gross_losses),
+            "net_wins": len(net_wins),
+            "net_losses": len(net_losses),
             "breakeven": breakeven,
-            "win_rate": round(len(wins) / total * 100.0, 2),
-            "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
-            "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0,
+            "win_rate": round(len(gross_wins) / total * 100.0, 2),
+            "net_win_rate": round(len(net_wins) / total * 100.0, 2),
+            "avg_win": round(gross_win_amount / len(gross_wins), 2) if gross_wins else 0.0,
+            "avg_loss": round(-gross_loss_amount / len(gross_losses), 2) if gross_losses else 0.0,
             "total_pnl": round(total_pnl, 2),
-            "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0),
+            "profit_factor": round(gross_win_amount / gross_loss_amount, 3) if gross_loss_amount > 0 else (999.0 if gross_win_amount > 0 else 0.0),
             "avg_holding_seconds": round(sum(holdings) / len(holdings), 1) if holdings else 0.0,
             "max_consecutive_wins": max_con_wins,
             "max_consecutive_losses": max_con_losses,
@@ -736,25 +851,38 @@ class Repository:
                     "total_trades": 0,
                     "wins": 0,
                     "losses": 0,
+                    "net_wins": 0,
+                    "net_losses": 0,
                     "total_pnl": 0.0,
+                    "gross_pnl": 0.0,
                 },
             )
-            pnl = float(t.net_pnl or 0.0)
+            net_pnl = float(t.net_pnl or 0.0)
+            gross_pnl = float(t.pnl or 0.0)
             entry["total_trades"] += 1
-            entry["total_pnl"] += pnl
-            if pnl > 0:
+            entry["total_pnl"] += net_pnl
+            entry["gross_pnl"] += gross_pnl
+            if gross_pnl > 0:
                 entry["wins"] += 1
-            elif pnl < 0:
+            elif gross_pnl < 0:
                 entry["losses"] += 1
+
+            if net_pnl > 0:
+                entry["net_wins"] += 1
+            elif net_pnl < 0:
+                entry["net_losses"] += 1
 
         rows = []
         for entry in buckets.values():
             decided = entry["wins"] + entry["losses"]
+            net_decided = entry["net_wins"] + entry["net_losses"]
             rows.append(
                 {
                     **entry,
                     "total_pnl": round(entry["total_pnl"], 2),
+                    "gross_pnl": round(entry["gross_pnl"], 2),
                     "win_rate": round(entry["wins"] / decided * 100.0, 2) if decided > 0 else 0.0,
+                    "net_win_rate": round(entry["net_wins"] / net_decided * 100.0, 2) if net_decided > 0 else 0.0,
                 }
             )
         rows.sort(key=lambda r: (r["strategy"], r["regime"]))

@@ -303,6 +303,8 @@ class YahooHistoricalFeed(BaseFeed):
             return "NIFTY_MIDCAP_100.NS"
         if clean in ("FINNIFTY", "NIFTY_FIN_SERVICE.NS"):
             return "NIFTY_FIN_SERVICE.NS"
+        if clean == "NAM":
+            return f"NAM-INDIA{_YAHOO_NSE_SUFFIX}"
 
         if clean.endswith(".NS") or clean.startswith("^"):
             return clean

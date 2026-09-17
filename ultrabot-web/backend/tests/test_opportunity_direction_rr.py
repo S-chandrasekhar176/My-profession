@@ -135,7 +135,9 @@ class TestOpportunityDirectionRiskReward:
         import re
         from pathlib import Path
 
-        src = Path("core/engine.py").read_text()
+        backend_dir = Path(__file__).resolve().parent.parent
+        engine_path = backend_dir / "core" / "engine.py"
+        src = engine_path.read_text(encoding="utf-8", errors="ignore")
         # strip comments and docstrings crudely but effectively for this check
         no_comments = re.sub(r"#.*", "", src)
         no_comments = re.sub(r'""".*?"""', "", no_comments, flags=re.DOTALL)
@@ -171,12 +173,13 @@ class TestOpportunityDirectionRiskReward:
             r"""|["'](LONG|SHORT)["']\s*[!=]=\s*[\w\)\]]\s*\.\s*direction"""
         )
         offenders = []
-        for path in Path(".").rglob("*.py"):
+        backend_dir = Path(__file__).resolve().parent.parent
+        for path in backend_dir.rglob("*.py"):
             s = str(path)
-            if "venv" in s or s.startswith("tests/") or "node_modules" in s:
+            if "venv" in s or "tests" in s or "node_modules" in s:
                 continue
             try:
-                src = path.read_text()
+                src = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             no_comments = re.sub(r"#.*", "", src)

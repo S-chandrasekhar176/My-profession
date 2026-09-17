@@ -698,6 +698,10 @@ export default function DashboardPage() {
         : (Array.isArray(stratData) ? stratData.map((s: any) => s.name || s.id).slice(0, 4) : []);
 
     const regConf = (raw?.regime_confidence || raw?.regimeConfidence || (typeof raw?.confidence === 'number' ? Math.round(raw.confidence * 100) : 0)) as number;
+    const todayGrossPnl = typeof pnlSummary.gross_pnl === 'number' ? Number(pnlSummary.gross_pnl) : todayPnl;
+    const todayFees = typeof pnlSummary.total_fees === 'number' ? Number(pnlSummary.total_fees) : 0;
+    const todayNetPnl = typeof pnlSummary.net_pnl === 'number' ? Number(pnlSummary.net_pnl) : todayPnl;
+    const todayGrossWinRate = typeof pnlSummary.win_rate === 'number' ? Number(pnlSummary.win_rate) : allTimeWinRate;
 
     return {
       todayPnl,
@@ -711,6 +715,10 @@ export default function DashboardPage() {
       todayWinRate,
       todayTradesCount,
       todayWinningTradesCount,
+      todayGrossPnl,
+      todayFees,
+      todayNetPnl,
+      todayGrossWinRate,
       hasTradeHistory,
       riskUsed,
       totalCapital,

@@ -38,6 +38,10 @@ export interface DashboardData {
   freeCapital: number;
   dayPnl: number;
   totalPnl: number;
+  todayGrossPnl?: number;
+  todayFees?: number;
+  todayNetPnl?: number;
+  todayGrossWinRate?: number;
   positions: Position[];
   recentTrades: Trade[];
   engineStatus: string;

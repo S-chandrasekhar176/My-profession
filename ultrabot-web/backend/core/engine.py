@@ -809,6 +809,7 @@ class UltraBotEngine:
                 "state": "running",
                 "mode": mode,
                 "broker": broker_name,
+                "capital": self.initial_capital,
                 "details": f"Session {self.session_id[:8]} started with {len(self.active_strategies)} active strategies ({self.current_regime} regime)",
             })
 
@@ -2306,6 +2307,41 @@ class UltraBotEngine:
                 opportunity = self._build_opportunity(
                     signal, strategy_name, symbol, current_price, sizing, risk_result, signal_id=sig_id
                 )
+
+                # Gate G21 ML Veto Check (enforce mode)
+                risk_cfg = self.config.get("risk", {}) if hasattr(self, "config") and isinstance(self.config, dict) else {}
+                g21_mode = str(risk_cfg.get("g21_mode", "enforce")).lower()
+                if g21_mode == "enforce" and opportunity.get("ml_action") == "VETO":
+                    veto_score = opportunity.get("ml_win_probability") or opportunity.get("ml_score") or 0.0
+                    veto_reason = f"M3a ML model VETO: win probability {veto_score * 100.0:.1f}% < 40%"
+                    logger.info(
+                        "Signal %s/%s rejected by Gate G21_ML_Veto: %s",
+                        strategy_name, symbol, veto_reason,
+                    )
+                    if self._signals_passed_count > 0:
+                        self._signals_passed_count -= 1
+                    self._signals_rejected_count += 1
+                    self._rejections_by_gate["G21_ML_Veto"] = (
+                        self._rejections_by_gate.get("G21_ML_Veto", 0) + 1
+                    )
+                    self._rejections_by_strategy[strategy_name] = (
+                        self._rejections_by_strategy.get(strategy_name, 0) + 1
+                    )
+                    self._record_telemetry_event(
+                        symbol=symbol,
+                        strategy=strategy_name,
+                        status="REJECTED",
+                        direction=signal.get("direction", "—"),
+                        price=current_price,
+                        confidence=float(signal.get("confidence", 0.0)),
+                        gate="G21_ML_Veto",
+                        reason=veto_reason,
+                    )
+                    try:
+                        await repo.update_signal(sig_id, status="rejected", reason=veto_reason)
+                    except Exception:
+                        pass
+                    continue
 
                 # Store in pending
                 opp_id = opportunity["id"]
@@ -4804,6 +4840,20 @@ class UltraBotEngine:
         extra_data["partial_fees"] = round(
             float(extra_data.get("partial_fees", 0.0) or 0.0) + partial_fees, 2
         )
+        stage_details = extra_data.get("stage_details") or {}
+        if not isinstance(stage_details, dict):
+            stage_details = {}
+        stage_details[str(level)] = {
+            "pnl": net_partial_pnl,
+            "qty": int(book_qty),
+            "price": round(current_price, 2),
+        }
+        extra_data["stage_details"] = stage_details
+        extra_data["booked_qty"] = int(extra_data.get("booked_qty", 0) or 0) + int(book_qty)
+        if booking_data.get("stages_fired"):
+            extra_data["stages_fired"] = booking_data.get("stages_fired")
+        elif hasattr(position, "stages_fired") and getattr(position, "stages_fired"):
+            extra_data["stages_fired"] = getattr(position, "stages_fired")
 
         async with self._repo_context() as repo:
             await repo.update_position(
@@ -5109,7 +5159,7 @@ class UltraBotEngine:
                 # legs, so record ONLY the final leg here — passing net_pnl
                 self.daily_risk.record_trade_result(
                     pnl=round(pnl_amount - exit_fees, 2),
-                    gross_pnl=round(pnl_amount, 2),
+                    gross_pnl=round(_round_trip_gross, 2),
                 )
                 daily_status = self.daily_risk.check_daily_limits()
                 if daily_status and not getattr(daily_status, "can_trade", True):

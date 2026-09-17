@@ -14,7 +14,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from notifications.eod_pdf import generate_eod_pdf
+try:
+    from notifications.eod_pdf import generate_eod_pdf
+    HAVE_REPORTLAB = True
+except ImportError:
+    generate_eod_pdf = None
+    HAVE_REPORTLAB = False
+
 from notifications.eod_report import EODReportGenerator
 from scanner.technical_scanner import TechnicalScanner, _VOLUME_ANOMALY_RATIO
 
@@ -108,6 +114,7 @@ def _sample_report():
     }
 
 
+@pytest.mark.skipif(not HAVE_REPORTLAB, reason="reportlab not installed")
 class TestEodPdfGeneration:
     @pytest.fixture
     def sample_report(self):

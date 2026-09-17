@@ -161,7 +161,10 @@ class FyersWebSocketFeed(BaseFeed):
     def _to_fyers_symbol(symbol: str, exchange: str = "NSE") -> str:
         if ":" in symbol:
             return symbol
-        return f"{exchange}:{symbol.upper()}-EQ"
+        sym = symbol.upper()
+        if sym == "NAM":
+            sym = "NAM-INDIA"
+        return f"{exchange}:{sym}-EQ"
 
     @staticmethod
     def _from_fyers_symbol(fyers_symbol: str) -> str:

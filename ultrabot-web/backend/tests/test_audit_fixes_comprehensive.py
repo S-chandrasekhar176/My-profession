@@ -36,9 +36,9 @@ def test_daily_risk_manager_fee_breakeven_tolerance():
     config = {"max_daily_loss_pct": 3.0, "max_consecutive_losses": 5, "fee_breakeven_tolerance_rupees": 60.0}
     manager = DailyRiskManager(config=config, total_capital=100000.0)
 
-    # 1. Stagnation / flat time-exit: Gross +₹4, Net -₹24 (fees ₹28)
-    # With gross_pnl >= 0, trade is classified as breakeven, NOT a consecutive loss
-    manager.record_trade_result(pnl=-24.0, gross_pnl=4.0)
+    # 1. Stagnation / flat time-exit: Gross ₹0, Net -₹24 (fees ₹24)
+    # With gross_pnl == 0, trade is classified as breakeven, NOT a consecutive loss
+    manager.record_trade_result(pnl=-24.0, gross_pnl=0.0)
     assert manager.breakeven == 1
     assert manager.losses == 0
     assert manager.consecutive_losses == 0

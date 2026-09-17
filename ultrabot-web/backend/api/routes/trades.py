@@ -98,6 +98,34 @@ async def get_trades(
         )
 
 
+@router.get("/trades/fees/summary")
+async def get_trades_fees_summary(
+    start_date: Optional[str] = Query(None, description="Custom start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Custom end date (YYYY-MM-DD)"),
+    username: Optional[str] = Depends(get_optional_user),
+    repo: Repository = Depends(get_repository),
+) -> Dict[str, Any]:
+    """Return aggregated fee summary across multiple timeframes:
+    today, week, month, year, overall, and custom date range.
+    Surfaces Gross P&L, Total Fees (brokerage & statutory taxes), Net P&L,
+    and fee drag percentage to ensure full institutional fee awareness.
+    """
+    try:
+        summary = await repo.get_multi_timeframe_fee_summary(
+            custom_start=start_date,
+            custom_end=end_date,
+        )
+        return {
+            "status": "success",
+            "timeframes": summary,
+        }
+    except Exception as exc:
+        logger.error("Failed to fetch fee summary: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch fee summary: {str(exc)}",
+        )
+
 
 @router.get("/trades/curves/performance")
 async def get_trades_performance_curves(
@@ -318,12 +346,27 @@ async def get_trades_performance_curves(
         losses = 0
         total_gain = 0.0
         total_loss = 0.0
-        
+        cum_gross = 0.0
+        cum_fees = 0.0
+        gross_wins = 0
+        gross_losses = 0
+        total_fees = 0.0
+        total_gross = 0.0
+
         for idx, t in enumerate(trades, start=1):
             await _reconcile_closed_trade_pnl(repo, t)
-            net = round(float(t.net_pnl or t.pnl or 0.0), 2)
-            is_win = net > 0
-            if is_win:
+            gross = round(float(t.pnl or 0.0), 2)
+            fee = round(float(t.fees or 0.0), 2)
+            net = round(float(t.net_pnl if t.net_pnl is not None else (gross - fee)), 2)
+            is_gross_win = gross > 0
+            is_net_win = net > 0
+
+            if is_gross_win:
+                gross_wins += 1
+            else:
+                gross_losses += 1
+
+            if is_net_win:
                 wins += 1
                 cum_profit = round(cum_profit + net, 2)
                 total_gain = round(total_gain + net, 2)
@@ -331,12 +374,17 @@ async def get_trades_performance_curves(
                 losses += 1
                 cum_loss = round(cum_loss + net, 2)
                 total_loss = round(total_loss + net, 2)
+
             cum_net = round(cum_net + net, 2)
-            
+            cum_gross = round(cum_gross + gross, 2)
+            cum_fees = round(cum_fees + fee, 2)
+            total_gross = round(total_gross + gross, 2)
+            total_fees = round(total_fees + fee, 2)
+
             date_str = (t.entry_time or t.created_at or "")[:10]
             daily_dict[date_str] = round(daily_dict.get(date_str, 0.0) + net, 2)
             daily_counts[date_str] = daily_counts.get(date_str, 0) + 1
-            
+
             point = {
                 "index": idx,
                 "id": str(t.id)[:8],
@@ -346,9 +394,14 @@ async def get_trades_performance_curves(
                 "timestamp": t.exit_time or t.entry_time,
                 "date": date_str,
                 "trade_pnl": net,
-                "is_win": is_win,
+                "trade_gross_pnl": gross,
+                "trade_fees": fee,
+                "is_win": is_gross_win,
+                "is_net_win": is_net_win,
                 "cumulative_profit": cum_profit,
                 "cumulative_loss": cum_loss,
+                "cumulative_gross_pnl": cum_gross,
+                "cumulative_fees": cum_fees,
                 "cumulative_net_pnl": cum_net,
             }
             curves.append(point)
@@ -356,15 +409,19 @@ async def get_trades_performance_curves(
                 "id": str(t.id)[:8],
                 "symbol": t.symbol,
                 "amount": net,
-                "is_win": is_win,
+                "gross_amount": gross,
+                "fees": fee,
+                "is_win": is_gross_win,
+                "is_net_win": is_net_win,
                 "date": date_str,
             })
-            
+
         total_trades = len(trades)
+        gross_win_rate = round((gross_wins / total_trades * 100.0), 1) if total_trades > 0 else 0.0
         win_rate = round((wins / total_trades * 100.0), 1) if total_trades > 0 else 0.0
         avg_win = round(total_gain / wins, 2) if wins > 0 else 0.0
         avg_loss = round(total_loss / losses, 2) if losses > 0 else 0.0
-        
+
         daily_timeline = [
             {"date": d, "pnl": pnl, "trades_count": daily_counts.get(d, 0)}
             for d, pnl in sorted(daily_dict.items())

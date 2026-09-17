@@ -69,8 +69,8 @@ export default function DashboardStatsBanner({ data }: { data: DashboardData }) 
 
   return (
     <>
-      {/* Card 1: Today's P&L */}
-      <StatCard title="Today's P&L">
+      {/* Card 1: Today's P&L & Fee Drag */}
+      <StatCard title="Today's Net P&amp;L">
         <div className="flex items-center gap-3">
           <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${pnlIsPositive ? 'bg-ub-profit/10' : 'bg-ub-loss/10'}`}>
             {pnlIsPositive ? (
@@ -79,13 +79,20 @@ export default function DashboardStatsBanner({ data }: { data: DashboardData }) 
               <TrendingDown className="h-5 w-5 text-ub-loss" />
             )}
           </div>
-          <div>
-            <p className={`text-xl font-bold font-mono ${pnlColor}`}>
-              {formatINR(data.todayPnl)}
-            </p>
-            <p className={`text-xs font-medium ${pnlColor}`}>
-              {formatPercent(data.todayPnlPercent)}
-            </p>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-baseline gap-2">
+              <p className={`text-xl font-bold font-mono ${pnlColor}`}>
+                {formatINR(data.todayPnl)}
+              </p>
+              <p className={`text-xs font-medium ${pnlColor}`}>
+                {formatPercent(data.todayPnlPercent)}
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5 text-[10px] text-ub-text-muted mt-0.5 whitespace-nowrap">
+              <span>Gross: <strong className={data.todayGrossPnl && data.todayGrossPnl >= 0 ? 'text-ub-profit' : 'text-ub-loss'}>{formatINR(data.todayGrossPnl ?? data.todayPnl)}</strong></span>
+              <span className="text-ub-border">|</span>
+              <span>Fees: <strong className="text-amber-400">-{formatINR(data.todayFees ?? 0)}</strong></span>
+            </div>
           </div>
         </div>
       </StatCard>
@@ -148,9 +155,12 @@ export default function DashboardStatsBanner({ data }: { data: DashboardData }) 
                 : 'Needs Tuning'}
             </span>
             {data.todayTradesCount > 0 && (
-              <span className="text-[10px] text-cyan-400 font-mono mt-0.5">
-                Today: {data.todayWinningTradesCount}/{data.todayTradesCount} ({data.todayWinRate}%)
-              </span>
+              <div className="flex flex-col text-[10px] font-mono mt-0.5">
+                <span className="text-cyan-400">Today Net: {data.todayWinningTradesCount}/{data.todayTradesCount} ({data.todayWinRate}%)</span>
+                {data.todayGrossWinRate !== undefined && (
+                  <span className="text-emerald-400">Strat WR: {data.todayGrossWinRate}% (Gross)</span>
+                )}
+              </div>
             )}
           </div>
         </div>

@@ -32,7 +32,7 @@ risk:
   max_open_positions: 10
   max_per_sector: 2
   max_sector_concentration_pct: 40.0
-  max_daily_trades: 10
+  max_daily_trades: 20
   max_daily_loss_pct: 3.0
   max_consecutive_losses: 5
   consec_loss_cooloff_minutes: 30
@@ -62,8 +62,10 @@ risk:
   banknifty_sanity_min: 25000
   banknifty_sanity_max: 100000
   max_fee_pct_of_risk: 30.0
-  g19_mode: log_only
-  min_move_fee_multiple: 2.0
+  g19_mode: enforce
+  min_move_fee_multiple: 2.5
+  g21_mode: enforce
+  ml_veto_threshold: 0.40
   hard_risk_pct: 1.0
   per_strategy_daily_loss_pct: 1.0
   per_strategy_daily_loss_overrides:
@@ -273,6 +275,8 @@ strategy_activation:
     - MRF
     - VC
     - SIC
+    - VR
+    - BBR
     paused:
     - PTC
     - MB
@@ -282,6 +286,8 @@ strategy_activation:
       MRF: 1.2
       VC: 1.1
       SIC: 1.0
+      VR: 1.2
+      BBR: 1.2
       PTC: 0.0
       MB: 0.0
       TRS: 0.0
