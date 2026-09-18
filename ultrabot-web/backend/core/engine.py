@@ -3678,13 +3678,35 @@ class UltraBotEngine:
         try:
             from ml.inference import get_inference_engine
             ml_engine = get_inference_engine()
+
+            # Dynamic PCR and IV Rank from OptionChainRecorder (eliminates train/serve skew)
+            pcr_val = 1.0
+            ivr_val = 50.0
+            opt_rec = getattr(self, "option_recorder", None)
+            if not opt_rec:
+                try:
+                    import sys
+                    app_mod = sys.modules.get("app")
+                    if app_mod and hasattr(app_mod, "app") and hasattr(app_mod.app, "state"):
+                        opt_rec = getattr(app_mod.app.state, "option_recorder", None)
+                except Exception:
+                    pass
+
+            if opt_rec and hasattr(opt_rec, "get_latest_metrics"):
+                metrics_opt = opt_rec.get_latest_metrics(symbol)
+                pcr_val = metrics_opt.get("pcr", 1.0)
+                ivr_val = metrics_opt.get("iv_rank", 50.0)
+            elif hasattr(self, "current_pcr") and self.current_pcr is not None:
+                pcr_val = float(self.current_pcr)
+                ivr_val = float(getattr(self, "current_iv_rank", 50.0) or 50.0)
+
             ml_eval = ml_engine.score_signal(
                 signal=signal,
                 candles_df=signal.get("candles_df"),
                 vix=float(self.vix or 15.0),
                 regime=str(self.current_regime or "sideways"),
-                pcr=float(getattr(self, "current_pcr", 1.0) or 1.0),
-                iv_rank=float(getattr(self, "current_iv_rank", 50.0) or 50.0),
+                pcr=float(pcr_val),
+                iv_rank=float(ivr_val),
             )
         except Exception as ml_err:
             logger.debug("ML advisory scoring failed: %s", ml_err)

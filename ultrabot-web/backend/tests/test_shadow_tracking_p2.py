@@ -166,7 +166,7 @@ def test_defaults_yaml_shadow_list_matches_registry_exactly():
     cfg = _load_defaults_cfg()
     shadow_list = cfg.get("strategy_shadow_mode", [])
 
-    assert len(shadow_list) == 15, "TRS + 14 dormant strategies expected"
+    assert len(shadow_list) == 17, "TRS + 14 dormant strategies + VR + BBR expected"
     reg = StrategyRegistry()
     reg.discover()
     registered = set(reg.get_all().keys())
@@ -185,16 +185,16 @@ def test_defaults_yaml_trading_strategies_never_shadowed():
     assert overlap == [], f"live strategies must not be shadow-listed: {overlap}"
 
 
-def test_all_21_registered_strategies_are_now_scanned():
-    """7 trading (active in Bull) + 15 shadow = the complete 21-strategy
+def test_all_23_registered_strategies_are_now_scanned():
+    """7 trading (active in Bull) + 17 shadow = the complete 23-strategy
     registry is exercised every cycle (union has no gaps)."""
     engine = _engine_with(
         ["ORB", "PTC", "VC", "SIC", "MB", "MRF", "TRS"],  # Bull active list
         ["TRS", "AdaptiveSupertrend", "Breakout", "GapFill", "MeanReversion",
          "Momentum", "MultiTimeframe", "NewsMomentum", "ORBVolume",
          "ORB_Classic", "RSIDivergence", "SectorRotation", "Supertrend",
-         "TrendExhaustion", "VWAPReversion"],
+         "TrendExhaustion", "VWAPReversion", "VR", "BBR"],
     )
     scan = engine._scan_strategy_list()
-    assert len(scan) == 21
-    assert len(set(s.upper() for s in scan)) == 21  # all unique
+    assert len(scan) == 23
+    assert len(set(s.upper() for s in scan)) == 23  # all unique

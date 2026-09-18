@@ -25,7 +25,7 @@ class ScoreSignalRequest(BaseModel):
 
 
 class TrainModelRequest(BaseModel):
-    use_synthetic_bootstrap_if_sparse: bool = Field(True, description="Augment with statistical bootstrap if live samples < 50")
+    use_synthetic_bootstrap_if_sparse: bool = Field(False, description="Augment with statistical bootstrap if live samples < 50")
     min_samples_threshold: int = Field(50, ge=10, le=1000)
 
 
@@ -93,8 +93,11 @@ async def trigger_training(
     else:
         training_data = list(outcomes)
 
-    if not training_data:
-        raise HTTPException(status_code=400, detail="Insufficient training data available")
+    if len(training_data) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient real shadow outcomes ({len(training_data)} found, minimum 20 required for chronological walk-forward validation). Accumulate more live soak sessions before training."
+        )
 
     # Run training and walk-forward validation
     try:

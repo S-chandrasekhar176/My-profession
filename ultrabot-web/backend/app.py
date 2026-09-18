@@ -368,6 +368,7 @@ async def lifespan(app: FastAPI):
         )
         option_recorder.start()
         app.state.option_recorder = option_recorder
+        eng.option_recorder = option_recorder
 
         # Wave-1 style task supervisor for OptionChainRecorder with exponential backoff & circuit-breaking
         async def _supervise_option_recorder():

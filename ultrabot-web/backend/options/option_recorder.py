@@ -55,6 +55,17 @@ class OptionChainRecorder:
         self.last_poll_time: Optional[float] = None
         self.last_heartbeat: Optional[float] = None
         self.last_verification_status: Dict[str, Any] = {}
+        self.latest_metrics: Dict[str, Dict[str, float]] = {}
+
+    def get_latest_metrics(self, symbol: str = "NIFTY") -> Dict[str, float]:
+        """Return latest live PCR, IV, and IV rank for a symbol or market index fallback."""
+        sym = str(symbol).upper()
+        if sym in self.latest_metrics:
+            return self.latest_metrics[sym]
+        for candidate in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
+            if candidate in self.latest_metrics:
+                return self.latest_metrics[candidate]
+        return {"pcr": 1.0, "iv": 0.15, "iv_rank": 50.0}
 
     async def _resolve_broker(self) -> Any:
         """Resolve current broker instance either from static attribute or dynamic getter."""
@@ -227,6 +238,19 @@ class OptionChainRecorder:
                                 await close_res
                         except Exception:
                             pass
+
+            # Cache latest live option market telemetry for engine / ML inference
+            raw_iv = float(atm_call.get("iv", 0.0) or (atm_put.get("iv", 0.0) if atm_put else 0.0) or 0.15) if atm_call else 0.15
+            iv_pct = round(raw_iv * 100.0, 1) if raw_iv < 1.0 else round(raw_iv, 1)
+            iv_rank_est = max(0.0, min(100.0, (iv_pct - 10.0) / 20.0 * 100.0))
+            self.latest_metrics[str(symbol).upper()] = {
+                "pcr": round(float(pcr), 3),
+                "iv": round(raw_iv, 4),
+                "iv_rank": round(float(iv_rank_est), 1),
+                "spot": spot,
+                "atm_strike": atm_strike,
+                "timestamp": now_epoch,
+            }
 
             return {
                 "status": "success",

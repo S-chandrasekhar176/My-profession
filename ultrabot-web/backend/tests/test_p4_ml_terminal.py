@@ -84,8 +84,9 @@ def test_recent_evaluations_storage_and_filtering():
 
 
 def test_scorecard_metrics_calculation():
-    """Verify scorecard metric calculations: edge uplift, Brier score, veto savings, drift, calibration curve."""
+    """Verify scorecard metric calculations: unvalidated contract vs validated contract."""
     engine = MLInferenceEngine()
+    # 1. Honest unvalidated contract on boot without report
     metrics = engine.get_scorecard_metrics()
 
     assert "total_evaluations" in metrics
@@ -95,10 +96,27 @@ def test_scorecard_metrics_calculation():
     assert "drift_status" in metrics
     assert metrics["drift_status"] in ("HEALTHY", "MODERATE", "HIGH", "stable")
     assert "calibration_curve" in metrics
-    assert len(metrics["calibration_curve"]) > 0
+    assert metrics["has_validation_data"] is False
+    assert metrics["calibration_curve"] == []
+
+    # 2. Validated contract when empirical validation report is loaded
+    engine.last_validation_report = {
+        "overall_uplift_pct": 12.5,
+        "overall_brier_score": 0.165,
+        "baseline_win_rate_pct": 51.2,
+        "model_win_rate_pct": 63.7,
+        "overall_roc_auc": 0.65,
+        "calibration_curve": [
+            {"bin_range": "0.4-0.5", "predicted_prob": 0.45, "empirical_frequency": 0.44}
+        ],
+    }
+    val_metrics = engine.get_scorecard_metrics()
+    assert val_metrics["has_validation_data"] is True
+    assert val_metrics["edge_uplift_pct"] == 12.5
+    assert len(val_metrics["calibration_curve"]) > 0
 
     # Check decile structure
-    decile = metrics["calibration_curve"][0]
+    decile = val_metrics["calibration_curve"][0]
     assert "bin" in decile
     assert "predicted_win_rate" in decile
     assert "actual_win_rate" in decile

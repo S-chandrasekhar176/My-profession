@@ -8,7 +8,7 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
-    Column, Text, Integer, Float, Boolean, DateTime, Date, String,
+    Column, Text, Integer, Float, Boolean, DateTime, Date, String, Index,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -397,6 +397,9 @@ class ShadowOutcome(Base):
 # ──────────────────────────────────────────────
 class OptionSnapshot(Base):
     __tablename__ = "option_snapshots"
+    __table_args__ = (
+        Index("ix_option_snapshots_symbol_timestamp", "underlying_symbol", "timestamp"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=_generate_uuid)
     timestamp: Mapped[str] = mapped_column(Text, nullable=False, index=True)
@@ -453,3 +456,22 @@ def ensure_shadow_feature_columns(db_path: str) -> list:
     finally:
         conn.close()
     return added
+
+
+def ensure_option_snapshots_indices(db_path: str) -> bool:
+    """Ensure composite index on option_snapshots(underlying_symbol, timestamp) exists."""
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "option_snapshots" in tables:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_option_snapshots_symbol_timestamp "
+                "ON option_snapshots (underlying_symbol, timestamp)"
+            )
+            conn.commit()
+            return True
+        return False
+    finally:
+        conn.close()

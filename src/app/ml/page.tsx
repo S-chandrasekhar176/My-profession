@@ -747,21 +747,46 @@ export default function MachineLearningPanoramicCockpit() {
                     onClick={() =>
                       setSelectedInspectorItem({
                         id: 'neural_prior_winrate',
-                        title: 'Neural Prior Win Rate (63.7% - 68.4%)',
+                        title: metrics?.has_validation_data
+                          ? `Walk-Forward Calibrated Win Rate (${metrics.model_win_rate_pct}%)`
+                          : 'Model Calibrated Win Rate (Pending Soak Validation)',
                         category: 'NEURAL_PRIOR',
-                        status: `${metrics?.model_win_rate_pct || 63.7}% OOS ACCURACY`,
-                        statusType: 'success',
+                        status: metrics?.has_validation_data
+                          ? `${metrics.model_win_rate_pct}% OOS ACCURACY`
+                          : 'AWAITING EMPIRICAL VALIDATION',
+                        statusType: metrics?.has_validation_data ? 'success' : 'info',
                         sourceFile: 'ultrabot-web/backend/ml/inference.py (score_signal / train)',
-                        sourceFeed: 'Walk-Forward K-Fold Validation on Shadow Outcomes Database',
+                        sourceFeed: 'Walk-Forward Chronological Validation on Shadow Outcomes Database',
                         frequency: 'Persistent prior, retrained on demand or drift alert',
-                        purpose:
-                          'Proves: "What is win rate based on?" It is calculated out-of-sample over 150 historical validation trades. It proves that filtering setups with ML yields a +12.5% edge over the 51.2% unfiltered baseline.',
+                        purpose: metrics?.has_validation_data
+                          ? `Calculated out-of-sample across ${metrics.total_evaluations || 0} shadow outcomes. Filtering setups with ML yields a +${metrics.edge_uplift_pct}% edge over the ${metrics.baseline_win_rate_pct}% unfiltered baseline.`
+                          : 'Model walk-forward calibration is pending accumulation of empirical shadow outcome trade samples from live market soak sessions.',
                         whatWeKnow: [
-                          { label: 'Model Win Rate', value: `${metrics?.model_win_rate_pct || 63.7}%`, detail: 'Out-of-sample accuracy across unseen shadow trades.' },
-                          { label: 'Baseline Win Rate', value: `${metrics?.baseline_win_rate_pct || 51.2}%`, detail: 'Unfiltered baseline ORB/VWAP strategies without ML.' },
-                          { label: 'Edge Uplift', value: `+${metrics?.edge_uplift_pct || 12.5}% Net Edge`, detail: 'Statistically verified (p < 0.01).' },
-                          { label: 'Brier Reliability Score', value: `${metrics?.brier_score || 0.165}`, detail: 'Calibration score < 0.25 guarantees probabilities match empirical outcomes.' },
-                          { label: 'Validation Cohort', value: 'N=150 trades (Walk-forward 5 folds)', detail: 'No data snooping or lookahead bias.' },
+                          {
+                            label: 'Model Win Rate',
+                            value: metrics?.has_validation_data && metrics?.model_win_rate_pct ? `${metrics.model_win_rate_pct}%` : '—',
+                            detail: metrics?.has_validation_data ? 'Out-of-sample accuracy across unseen shadow trades.' : 'Awaiting empirical walk-forward validation.',
+                          },
+                          {
+                            label: 'Baseline Win Rate',
+                            value: metrics?.has_validation_data && metrics?.baseline_win_rate_pct ? `${metrics.baseline_win_rate_pct}%` : '—',
+                            detail: 'Unfiltered baseline strategies without ML veto.',
+                          },
+                          {
+                            label: 'Edge Uplift',
+                            value: metrics?.has_validation_data && metrics?.edge_uplift_pct ? `+${metrics.edge_uplift_pct}% Net Edge` : '—',
+                            detail: metrics?.has_validation_data ? 'Statistically verified out-of-sample.' : 'Pending real trade resolution.',
+                          },
+                          {
+                            label: 'Brier Reliability Score',
+                            value: metrics?.has_validation_data && metrics?.brier_score !== null && metrics?.brier_score !== undefined ? `${metrics.brier_score}` : '—',
+                            detail: 'Calibration score < 0.25 guarantees probabilities match empirical outcomes.',
+                          },
+                          {
+                            label: 'Validation Cohort',
+                            value: metrics?.has_validation_data ? `N=${metrics.total_evaluations || 0} trades (Walk-forward splits)` : 'Awaiting soak samples (Phase P2/P3)',
+                            detail: 'Strict chronological forward splits with zero lookahead bias.',
+                          },
                         ],
                         mathematicsOrRule: 'P(Win | X) = Sigmoid((w^T * X + b) / T) where T = 1.12',
                         deepDiveTab: 'calibration',
@@ -770,7 +795,7 @@ export default function MachineLearningPanoramicCockpit() {
                     className="relative w-12 h-12 rounded-full bg-[#0E2033] border-2 border-cyan-400 shadow-[0_0_25px_rgba(0,240,255,0.9)] flex flex-col items-center justify-center cursor-pointer hover:scale-115 active:scale-95 transition-transform animate-pulse"
                   >
                     <span className="text-[11px] font-black text-white font-mono leading-none">
-                      {metrics?.model_win_rate_pct ? `${Math.round(metrics.model_win_rate_pct)}%` : '68%'}
+                      {metrics?.has_validation_data && metrics?.model_win_rate_pct ? `${Math.round(metrics.model_win_rate_pct)}%` : '—'}
                     </span>
                     <span className="text-[7px] font-mono text-emerald-400 font-bold mt-0.5">WIN</span>
                   </div>
