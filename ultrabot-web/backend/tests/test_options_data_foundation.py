@@ -8,7 +8,8 @@ Validates:
 - OptionChainRecorder background ingestion.
 """
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -300,7 +301,12 @@ async def test_option_recorder_single_poll(async_session):
         symbols=["NIFTY"],
     )
 
-    result = await recorder.poll_and_record_once("NIFTY", full_chain=False)
+    from core.market_hours import IST
+    frozen_now = datetime.fromtimestamp(1790409600.0 - (15.0 * 86400.0), tz=IST)
+    with patch("options.option_recorder.datetime") as mock_dt:
+        mock_dt.now.return_value = frozen_now
+        result = await recorder.poll_and_record_once("NIFTY", full_chain=False)
+
     assert result["status"] == "success"
     assert result["symbol"] == "NIFTY"
     assert result["atm_strike"] == 24500.0

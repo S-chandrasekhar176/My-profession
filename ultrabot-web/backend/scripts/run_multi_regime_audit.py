@@ -344,12 +344,21 @@ async def run_audit():
         print(f"  * Passing Gate Verification                : {passed_count}/{total_active_eval} ({passed_count/total_active_eval*100:.1f}%)")
     print("=" * 90 + "\n")
 
-    # Save report
+    # Save report with explicit provenance metadata
+    report_payload = {
+        "metadata": {
+            "provenance": "synthetic_gbm_simulation",
+            "generator": "scripts/run_multi_regime_audit.py",
+            "is_empirical_backtest": False,
+            "warning": "CRITICAL: This audit was generated using synthetic Geometric Brownian Motion (GBM) candles with arbitrary drift and volatility. It is a synthetic code-path simulation of order rules and regime filters, NOT empirical historical market replay or exchange tick data. All production capital decisions require empirical exchange data.",
+        },
+        "results": results,
+    }
     output_path = BACKEND_DIR / "evidence" / "multi_regime_audit_report.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-    print(f"Full audit report saved to: {output_path}")
+        json.dump(report_payload, f, indent=2)
+    print(f"Simulation audit report saved with provenance metadata to: {output_path}")
 
 
 if __name__ == "__main__":

@@ -66,45 +66,23 @@ class MLInferenceEngine:
                     try:
                         with open(val_path, "r", encoding="utf-8") as vf:
                             self.last_validation_report = json.load(vf)
-                    except Exception:
-                        pass
-                if not self.last_validation_report:
-                    bootstrap_samples = self.builder.generate_synthetic_bootstrap(n_samples=150)
-                    X, y = self.builder.build_dataset(bootstrap_samples, fit_scaler=False)
-                    validator = WalkForwardValidator(n_splits=4, min_train_size=max(20, int(len(X) * 0.3)), veto_threshold=self.veto_threshold)
-                    self.last_validation_report = validator.evaluate(X, y)
+                    except Exception as e:
+                        logger.warning("Failed to load validation report from %s: %s", val_path, e)
+                        self.last_validation_report = None
+                else:
+                    self.last_validation_report = None
 
-                self._seed_initial_evaluations_if_empty()
                 return
             except Exception as e:
                 logger.warning("Could not load model from %s: %s; initializing prior.", self.model_path, e)
 
-        # Initialize with synthetic bootstrap prior so inference works immediately
+        # Initialize with synthetic bootstrap prior ONLY for weights if no model on disk
         self.train_on_bootstrap(n_samples=150, save_to_disk=False)
-        self._seed_initial_evaluations_if_empty()
+        self.last_validation_report = None
 
     def _seed_initial_evaluations_if_empty(self) -> None:
-        """Pre-populate a few representative evaluations so the ML terminal is immediately informative."""
-        if len(self.recent_evaluations) > 0:
-            return
-
-        demo_signals = [
-            {"symbol": "NIFTY", "strategy": "ORB", "direction": "BUY", "vix": 14.8, "regime": "trending_up", "pcr": 1.28, "iv_rank": 42.0},
-            {"symbol": "BANKNIFTY", "strategy": "MRF", "direction": "SELL", "vix": 16.2, "regime": "sideways", "pcr": 0.88, "iv_rank": 64.0},
-            {"symbol": "FINNIFTY", "strategy": "VC", "direction": "BUY", "vix": 15.1, "regime": "trending_up", "pcr": 1.15, "iv_rank": 38.0},
-            {"symbol": "RELIANCE", "strategy": "SIC", "direction": "SELL", "vix": 23.5, "regime": "volatile", "pcr": 0.72, "iv_rank": 78.0},
-        ]
-        for s in demo_signals:
-            try:
-                self.score_signal(
-                    signal={"symbol": s["symbol"], "strategy": s["strategy"], "direction": s["direction"]},
-                    vix=s["vix"],
-                    regime=s["regime"],
-                    pcr=s["pcr"],
-                    iv_rank=s["iv_rank"],
-                )
-            except Exception:
-                pass
+        """No synthetic demo signals injected into production evaluation cache."""
+        return
 
     def train_on_bootstrap(self, n_samples: int = 150, save_to_disk: bool = True) -> Dict[str, Any]:
         """Pre-train the model on synthetic bootstrap samples representing market distributions."""
@@ -352,6 +330,13 @@ class MLInferenceEngine:
         """Save current model weights and scaler to disk."""
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
         self.model.save(str(self.model_path))
+        if self.last_validation_report:
+            val_path = self.model_path.parent / "m3a_validation_report.json"
+            try:
+                with open(val_path, "w", encoding="utf-8") as vf:
+                    json.dump(self.last_validation_report, vf, indent=2)
+            except Exception as e:
+                logger.warning("Could not persist validation report to %s: %s", val_path, e)
 
     def get_status(self) -> Dict[str, Any]:
         """Return runtime diagnostic telemetry for API and health monitoring."""

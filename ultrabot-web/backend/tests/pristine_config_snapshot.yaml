@@ -109,6 +109,8 @@ strategy_shadow_mode:
 - Supertrend
 - TrendExhaustion
 - VWAPReversion
+- VR
+- BBR
 paper_broker:
   slippage:
     enabled: true
@@ -118,6 +120,7 @@ paper_broker:
 partial_booking:
   enabled: true
   brokerage_buffer_pct: 0.05
+  min_s1_trigger_pct: 0.35
   stage1_trigger_pct: 0.5
   stage1_book_pct: 0.0
   stage2_trigger_pct: 1.0
@@ -132,7 +135,7 @@ partial_booking:
   trailing_sl_method: step
   trailing_step_pct: 0.5
 position_sizing:
-  method: dynamic_kelly
+  method: risk_based
   kelly_min_fraction: 0.02
   kelly_max_fraction: 0.08
   hard_risk_pct: 1.0
@@ -275,19 +278,19 @@ strategy_activation:
     - MRF
     - VC
     - SIC
-    - VR
-    - BBR
     paused:
     - PTC
     - MB
     - TRS
+    - VR
+    - BBR
     weights:
       ORB: 1.2
       MRF: 1.2
       VC: 1.1
       SIC: 1.0
-      VR: 1.2
-      BBR: 1.2
+      VR: 0.0
+      BBR: 0.0
       PTC: 0.0
       MB: 0.0
       TRS: 0.0
