@@ -2312,8 +2312,10 @@ class UltraBotEngine:
                 risk_cfg = self.config.get("risk", {}) if hasattr(self, "config") and isinstance(self.config, dict) else {}
                 g21_mode = str(risk_cfg.get("g21_mode", "enforce")).lower()
                 if g21_mode == "enforce" and opportunity.get("ml_action") == "VETO":
-                    veto_score = opportunity.get("ml_win_probability") or opportunity.get("ml_score") or 0.0
-                    veto_reason = f"M3a ML model VETO: win probability {veto_score * 100.0:.1f}% < 40%"
+                    veto_prob = opportunity.get("ml_win_probability")
+                    if veto_prob is None:
+                        veto_prob = (opportunity.get("ml_score") or 0.0) * 100.0
+                    veto_reason = f"M3a ML model VETO: win probability {veto_prob:.1f}% < 40%"
                     logger.info(
                         "Signal %s/%s rejected by Gate G21_ML_Veto: %s",
                         strategy_name, symbol, veto_reason,
