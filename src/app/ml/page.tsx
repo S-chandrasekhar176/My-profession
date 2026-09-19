@@ -284,7 +284,7 @@ export default function MachineLearningPanoramicCockpit() {
   const isBrokerConnected = activeBroker ? activeBroker.auth_status === 'connected' : false;
 
   // Real Gate G21 Veto Threshold (dynamic from scorecard metrics or latest evaluation)
-  const vetoThreshold = metrics?.veto_threshold ?? evaluations?.[0]?.veto_threshold ?? 0.40;
+  const vetoThreshold = metrics?.veto_threshold ?? evaluations?.[0]?.veto_threshold ?? null;
 
   // Cyber Terminal Logs (Honest Real-Time State)
   const [terminalLogs, setTerminalLogs] = useState<string[]>([
@@ -307,7 +307,7 @@ export default function MachineLearningPanoramicCockpit() {
       `[BROKER] ${brokerName} | CONNECTED: ${isBrokerConnected ? 'YES' : 'SIMULATED'}`,
       `[SOAK] PHASE: P2 DATA FOUNDATION ACTIVE`,
       `[VIX FEED] INDIA VIX: ${metrics?.avg_vix != null ? Number(metrics.avg_vix).toFixed(2) : 'PENDING'}`,
-      `[GATE G21] VETO THRESHOLD: ${Number(vetoThreshold).toFixed(2)} (ACTIVE)`,
+      `[GATE G21] VETO THRESHOLD: ${vetoThreshold != null ? Number(vetoThreshold).toFixed(2) : 'PENDING'} (ACTIVE)`,
     ];
 
     if (evaluations && evaluations.length > 0) {

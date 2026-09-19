@@ -366,5 +366,10 @@ def get_inference_engine() -> MLInferenceEngine:
     """Retrieve or initialize the global singleton inference engine."""
     global _inference_engine
     if _inference_engine is None:
-        _inference_engine = MLInferenceEngine()
+        try:
+            from config.settings import settings
+            vt = float((settings._raw_config.get("risk", {}) or {}).get("ml_veto_threshold", 0.40))
+        except Exception:
+            vt = 0.40
+        _inference_engine = MLInferenceEngine(veto_threshold=vt)
     return _inference_engine

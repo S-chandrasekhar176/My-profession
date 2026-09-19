@@ -1,0 +1,51 @@
+{
+  "status": "CLEARED",
+  "exit_code": 0,
+  "total_records": 4688,
+  "resolution": {
+    "resolved_count": 4688,
+    "unresolved_count": 0,
+    "rate_pct": 100.0
+  },
+  "features": {
+    "present_count": 4661,
+    "parse_error_count": 0,
+    "field_counts": {
+      "atr": 4661,
+      "atr_pct": 4661,
+      "computed_at": 4661,
+      "has_volume": 4661,
+      "htf_trend": 4661,
+      "liquidity_ratio": 4661,
+      "n_candles": 4661,
+      "schema_version": 4661,
+      "session_class": 4661,
+      "trend_strength": 4661,
+      "vwap_distance_pct": 4661
+    },
+    "null_field_counts": {}
+  },
+  "duplicates": {
+    "duplicate_ids_count": 0,
+    "duplicate_signal_ids_count": 0
+  },
+  "label_balance": {
+    "outcomes_distribution": {
+      "SHADOW_SL": 1959,
+      "SHADOW_TARGET": 940,
+      "SHADOW_EXPIRED": 1789
+    },
+    "wins_count": 2109,
+    "losses_count": 2550,
+    "breakeven_count": 29,
+    "win_rate_pct": 45.27
+  },
+  "look_ahead": {
+    "key_leakage_count": 0,
+    "timestamp_leakage_count": 0,
+    "total_leakage_count": 0
+  },
+  "reasons_blocked": [],
+  "warnings": [],
+  "generated_at": "2026-09-19T21:05:42.687459"
+}
