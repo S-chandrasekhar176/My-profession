@@ -277,20 +277,11 @@ export default function MachineLearningPanoramicCockpit() {
   const [activeTab, setActiveTab] = useState<MlSubTab>('profit_loss');
   const [selectedInspectorItem, setSelectedInspectorItem] = useState<EvidenceItem | null>(null);
 
-  // Cyber Terminal Logs
+  // Cyber Terminal Logs (Honest Real-Time State)
   const [terminalLogs, setTerminalLogs] = useState<string[]>([
     '[INIT] ULTRABOT ML ENGINE V4 ONLINE',
-    '[WS] FYERS TICK WEBSOCKET CONNECTED (0.8ms)',
-    '[INGEST] NIFTY 1-MIN TICK (24,845.20)',
-    '[INGEST] BANKNIFTY OPTIONS CHAIN OI PULLED',
-    '[FEATURE] ATR 14: 1.24% | PCR: 1.18 | IV: 42.0',
-    '[REGIME] CLASSIFIER: TRENDING_UP (CONF 88%)',
-    '[MODEL] INFERENCE EVALUATING CANDIDATE SET_7',
-    '[PREDICT] NIFTY ORB BUY SIGNAL WIN_PROB: 68.4%',
-    '[GATES] G1-G21 PASSED (DRAWDOWN OK, SPREAD OK)',
-    '[SIZING] KELLY FRACTION: 0.08 (QTY 75 LOTS)',
-    '[DISPATCH] ORDER SUBMITTED TO BROKER ROUTER',
-    '[STATUS] ACTIVE: TRAILING SL SET AT 24,790',
+    '[SOAK] PHASE: P2 DATA FOUNDATION ACTIVE',
+    '[MONITOR] AWAITING ENGINE TELEMETRY...',
   ]);
 
   const terminalEndRef = useRef<HTMLDivElement | null>(null);
@@ -299,24 +290,32 @@ export default function MachineLearningPanoramicCockpit() {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalLogs]);
 
+  // Synchronize terminal logs with real engine status, broker connection, and live evaluations
   useEffect(() => {
-    const streamItems = [
-      '[TICK] FYERS INGESTED 24,848.50 (+3.30)',
-      '[OI] CALL UNWINDING AT 24,800 CE (+18.4K)',
-      '[FEATURE] NORMALIZED 14 ALPHA VECTORS',
-      '[MODEL] RE-SCORING SHADOW POSITION #402',
-      '[GATE G21] ML ADVISORY SCORE: 0.684 PASS',
-      '[TELEMETRY] COMPUTE LATENCY 0.8ms (OPTIMAL)',
-      '[ORDER] SHADOW POSITION #403 MFE +12.4 PTS',
+    const logs: string[] = [
+      '[INIT] ULTRABOT ML ENGINE V4 ONLINE',
+      `[ENGINE] STATE: ${(engineStatus?.state || 'STOPPED').toUpperCase()} | UPTIME: ${engineStatus?.uptime != null ? `${Math.round(engineStatus.uptime)}s` : '0s'}`,
+      `[BROKER] ${brokerStatus?.name ? String(brokerStatus.name).toUpperCase() : 'PAPER BROKER'} | CONNECTED: ${brokerStatus?.connected ? 'YES' : 'SIMULATED'}`,
+      `[SOAK] PHASE: P2 DATA FOUNDATION ACTIVE`,
+      `[VIX FEED] INDIA VIX: ${metrics?.avg_vix != null ? Number(metrics.avg_vix).toFixed(2) : 'PENDING'}`,
+      `[GATE G21] VETO THRESHOLD: 0.40 (ACTIVE)`,
     ];
 
-    const logInterval = setInterval(() => {
-      const nextLog = streamItems[Math.floor(Math.random() * streamItems.length)];
-      setTerminalLogs((prev) => [...prev.slice(-35), nextLog]);
-    }, 2800);
+    if (evaluations && evaluations.length > 0) {
+      evaluations.slice(0, 15).forEach((ev) => {
+        const prob = ev.win_probability != null 
+          ? `${Number(ev.win_probability).toFixed(1)}%` 
+          : (ev.score != null ? `${(Number(ev.score) * 100).toFixed(1)}%` : 'N/A');
+        const actionLabel = ev.action === 'VETO' ? 'VETOED (G21 REJECT)' : 'APPROVED';
+        logs.push(`[EVAL] ${ev.symbol} ${ev.direction || 'BUY'} (${ev.strategy || 'M3a'}) | WIN_PROB: ${prob} -> ${actionLabel}`);
+      });
+    } else {
+      logs.push('[IDLE] P2 SHADOW SOAK ACTIVE — Awaiting strategy triggers');
+      logs.push('[MONITOR] INGESTION RUNNING: NIFTY/BANKNIFTY CHAINS');
+    }
 
-    return () => clearInterval(logInterval);
-  }, []);
+    setTerminalLogs(logs);
+  }, [engineStatus, brokerStatus, metrics, evaluations]);
 
   const fetchData = async () => {
     try {
@@ -639,8 +638,10 @@ export default function MachineLearningPanoramicCockpit() {
                         id: 'node_vix',
                         title: 'Market Ingestion: India VIX Volatility Index',
                         category: 'INGESTION',
-                        status: `${metrics?.avg_vix || 14.80} (NORMAL)`,
-                        statusType: 'success',
+                        status: metrics?.avg_vix != null
+                          ? `${Number(metrics.avg_vix).toFixed(2)} (${Number(metrics.avg_vix) < 18 ? 'NORMAL' : 'ELEVATED'})`
+                          : 'Pending Feed',
+                        statusType: metrics?.avg_vix != null && Number(metrics.avg_vix) >= 18 ? 'warning' : 'success',
                         sourceFile: 'ultrabot-web/backend/feeds/fyers_client.py',
                         sourceFeed: 'NSE India VIX Index Feed',
                         frequency: 'Real-time updates',
