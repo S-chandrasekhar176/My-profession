@@ -376,6 +376,7 @@ class TestDashboardFallbackDirection:
         )
         repo.get_todays_trades = AsyncMock(return_value=[])
         repo.get_watchlist_count = AsyncMock(return_value=0)
+        repo.get_multi_timeframe_fee_summary = AsyncMock(return_value={"overall": {}})
         data = await get_dashboard(username="u", engine=None, repo=repo)
         return data
 

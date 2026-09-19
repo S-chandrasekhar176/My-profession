@@ -59,7 +59,7 @@ async def init_db() -> None:
     # nullable-only, preserves every existing row).
     import asyncio
     import logging
-    from db.migrations import ensure_shadow_feature_columns
+    from db.migrations import ensure_shadow_feature_columns, ensure_option_snapshots_indices
 
     try:
         added = await asyncio.to_thread(ensure_shadow_feature_columns, str(DB_PATH))
@@ -67,6 +67,7 @@ async def init_db() -> None:
             logging.getLogger(__name__).info(
                 "shadow_outcomes migration: added columns %s", added
             )
+        await asyncio.to_thread(ensure_option_snapshots_indices, str(DB_PATH))
     except Exception:
         logging.getLogger(__name__).warning(
             "database schema migration failed", exc_info=True

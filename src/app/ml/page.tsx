@@ -912,7 +912,7 @@ export default function MachineLearningPanoramicCockpit() {
                       { label: 'Train Final Loss', value: metrics?.log_loss != null ? `${metrics.log_loss}` : 'Pending Training (P3)' },
                       { label: 'Val Final Loss', value: metrics?.val_loss != null ? `${metrics.val_loss}` : 'Pending Training (P3)' },
                       { label: 'Brier Reliability Score', value: metrics?.brier_score != null ? `${metrics.brier_score} (< 0.25)` : 'Pending Training (P3)' },
-                      { label: 'Sample Cohort', value: metrics?.total_samples ? `${metrics.total_samples} samples` : '4,688 logged samples (P2)' },
+                      { label: 'Sample Cohort', value: metrics?.total_samples ? `${metrics.total_samples} samples` : (metrics?.total_evaluations ? `${metrics.total_evaluations} logged samples (P2)` : '4,688 logged samples (P2)') },
                     ],
                     deepDiveTab: 'calibration',
                   })
@@ -956,8 +956,8 @@ export default function MachineLearningPanoramicCockpit() {
                     purpose:
                       'Compares expected model price vector against actual market trajectory to identify regime breaks and volatility expansion.',
                     whatWeKnow: [
-                      { label: 'Forecast Correlation', value: '+0.74 directional correlation' },
-                      { label: 'Lookahead Check', value: 'Point-in-time strictly verified' },
+                      { label: 'Forecast Correlation', value: metrics?.roc_auc != null ? `${metrics.roc_auc} ROC-AUC` : 'Pending Training (P3)' },
+                      { label: 'Lookahead Check', value: metrics?.has_validation_data ? 'Point-in-time strictly verified' : 'Pending Training (P3)' },
                       { label: 'Recent Accuracy', value: metrics?.model_win_rate_pct != null ? `${metrics.model_win_rate_pct}%` : 'Pending Training (P3)' },
                     ],
                     deepDiveTab: 'calibration',

@@ -119,8 +119,13 @@ async def get_dashboard(
         capital_usage_pct = round(total_invested / total_capital * 100, 2) if total_capital > 0 else 0
 
         # Multi-timeframe fee and P&L summary (all-time trades)
-        fee_summary = await repo.get_multi_timeframe_fee_summary()
-        all_time_pnl = fee_summary.get("overall", {})
+        all_time_pnl = {}
+        try:
+            fee_summary = await repo.get_multi_timeframe_fee_summary()
+            all_time_pnl = fee_summary.get("overall", {}) if isinstance(fee_summary, dict) else {}
+        except Exception as fee_exc:
+            logger.warning("Could not fetch multi_timeframe_fee_summary for dashboard: %s", fee_exc)
+            all_time_pnl = {}
 
         # Today's trades
         todays_trades = await repo.get_todays_trades()

@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+_fee_summary_cache: Dict[str, Any] = {"summary": None, "timestamp": 0.0}
+_FEE_SUMMARY_CACHE_TTL = 30.0  # seconds
 
 from sqlalchemy import select, update, delete, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -314,6 +318,11 @@ class Repository:
         """Aggregate Gross P&L, Total Fees, and Net P&L across multiple timeframes:
         today, week, month, year, overall, and custom range.
         """
+        now_ts = time.time()
+        if not custom_start and not custom_end:
+            if _fee_summary_cache["summary"] is not None and (now_ts - _fee_summary_cache["timestamp"] < _FEE_SUMMARY_CACHE_TTL):
+                return _fee_summary_cache["summary"]
+
         stmt = (
             select(Trade)
             .where(Trade.status == "CLOSED")
@@ -408,6 +417,10 @@ class Repository:
                 if c_start <= _get_trade_date(t) <= c_end
             ]
             summary["custom"] = _compute_bucket(custom_trades, "custom", custom_start, custom_end)
+
+        if not custom_start and not custom_end:
+            _fee_summary_cache["summary"] = summary
+            _fee_summary_cache["timestamp"] = now_ts
 
         return summary
 
