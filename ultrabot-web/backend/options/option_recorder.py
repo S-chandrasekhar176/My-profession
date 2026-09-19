@@ -136,8 +136,8 @@ class OptionChainRecorder:
         if self._fast_task and not self._fast_task.done():
             self._fast_task.cancel()
             try:
-                await self._fast_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._fast_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         self._fast_task = None
         logger.info("OptionChainRecorder stopped.")

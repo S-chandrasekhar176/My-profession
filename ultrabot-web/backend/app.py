@@ -452,17 +452,31 @@ async def lifespan(app: FastAPI):
         app.state.db_backup_job.stop()
     if hasattr(app.state, "option_recorder_supervisor") and app.state.option_recorder_supervisor:
         app.state.option_recorder_supervisor.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(app.state.option_recorder_supervisor), timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
     if hasattr(app.state, "option_prune_task") and app.state.option_prune_task and not app.state.option_prune_task.done():
         app.state.option_prune_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(app.state.option_prune_task), timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
     if hasattr(app.state, "option_recorder") and app.state.option_recorder:
         try:
-            await app.state.option_recorder.stop()
-        except Exception as opt_stop_err:
-            logger.debug("Error stopping OptionChainRecorder: %s", opt_stop_err)
-    if hasattr(app.state, "telegram_interactive"):
-        await app.state.telegram_interactive.stop()
+            await asyncio.wait_for(app.state.option_recorder.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as opt_stop_err:
+            logger.warning("OptionChainRecorder stop timed out or failed: %s", opt_stop_err)
+    if hasattr(app.state, "telegram_interactive") and app.state.telegram_interactive:
+        try:
+            await asyncio.wait_for(app.state.telegram_interactive.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as tg_stop_err:
+            logger.debug("Telegram interactive stop error: %s", tg_stop_err)
     if eng.state.value != "stopped":
-        await eng.stop()
+        try:
+            await asyncio.wait_for(eng.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as eng_stop_err:
+            logger.warning("Engine stop timed out or failed: %s", eng_stop_err)
     logger.info("UltraBot Web stopped")
 
 

@@ -148,6 +148,14 @@ class _FakeFyersClient:
 
 
 def _mk_broker(payload, monkeypatch):
+    # Quarantine/isolate fyers_apiv3 at the test boundary
+    import sys
+    from unittest.mock import MagicMock
+    if "fyers_apiv3" not in sys.modules:
+        sys.modules["fyers_apiv3"] = MagicMock()
+    if "fyers_apiv3.fyersModel" not in sys.modules:
+        sys.modules["fyers_apiv3.fyersModel"] = MagicMock()
+
     import brokers.fyers as fyers_mod
 
     broker = fyers_mod.FyersBroker.__new__(fyers_mod.FyersBroker)
@@ -155,7 +163,8 @@ def _mk_broker(payload, monkeypatch):
     return broker
 
 
-def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
     payload = {
         "s": "ok",
         "d": [
@@ -166,30 +175,30 @@ def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
         ],
     }
     broker = _mk_broker(payload, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(
-        broker.get_quotes(["NIFTY", "SENSEX"])
-    )
+    out = await broker.get_quotes(["NIFTY", "SENSEX"])
     assert out["NIFTY"]["price"] == 24361.9
     assert out["NIFTY"]["changePct"] == 0.03
     assert out["NIFTY"]["previousClose"] == 24356.85
     assert out["SENSEX"]["change"] == -120.5
 
 
-def test_fyers_get_quotes_derives_missing_change_fields(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_derives_missing_change_fields(monkeypatch):
     payload = {
         "s": "ok",
         "d": [{"n": "NSE:NIFTY50-INDEX", "s": "ok",
                "v": {"lp": 100.0, "prev_close_price": 98.0}}],
     }
     broker = _mk_broker(payload, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(broker.get_quotes(["NIFTY"]))
+    out = await broker.get_quotes(["NIFTY"])
     assert out["NIFTY"]["change"] == pytest.approx(2.0)
     assert out["NIFTY"]["changePct"] == pytest.approx(2.04)
 
 
-def test_fyers_get_quotes_bad_payload_never_raises(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_bad_payload_never_raises(monkeypatch):
     broker = _mk_broker({"s": "error"}, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(broker.get_quotes(["NIFTY"]))
+    out = await broker.get_quotes(["NIFTY"])
     assert out == {}
 
 
