@@ -57,7 +57,7 @@ class MLInferenceEngine:
                     self.builder.stds = self.model.stds
                 else:
                     bootstrap_samples = self.builder.generate_synthetic_bootstrap(n_samples=150)
-                    self.builder.build_dataset(bootstrap_samples, fit_scaler=True)
+                    self.builder.build_dataset(bootstrap_samples, fit_scaler=True, allow_synthetic=True)
                     self.model.means = self.builder.means
                     self.model.stds = self.builder.stds
 
@@ -87,14 +87,14 @@ class MLInferenceEngine:
     def train_on_bootstrap(self, n_samples: int = 150, save_to_disk: bool = True) -> Dict[str, Any]:
         """Pre-train the model on synthetic bootstrap samples representing market distributions."""
         bootstrap_samples = self.builder.generate_synthetic_bootstrap(n_samples=n_samples)
-        return self.train(bootstrap_samples, save_to_disk=save_to_disk)
+        return self.train(bootstrap_samples, save_to_disk=save_to_disk, allow_synthetic=True)
 
-    def train(self, outcomes: List[Any], save_to_disk: bool = True) -> Dict[str, Any]:
+    def train(self, outcomes: List[Any], save_to_disk: bool = True, allow_synthetic: bool = False) -> Dict[str, Any]:
         """Train model, run walk-forward validation, and optionally save to disk."""
         if not outcomes:
             raise ValueError("No outcomes provided for training")
 
-        X, y = self.builder.build_dataset(outcomes, fit_scaler=True)
+        X, y = self.builder.build_dataset(outcomes, fit_scaler=True, allow_synthetic=allow_synthetic)
         if len(X) == 0:
             raise ValueError("Failed to extract features from outcomes")
 

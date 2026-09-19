@@ -1409,7 +1409,7 @@ class Repository:
 
     async def get_shadow_outcomes_history(
         self,
-        limit: int = 500,
+        limit: Optional[int] = None,
         min_outcome_date: Optional[str] = None,
         only_resolved: bool = True,
     ) -> List[ShadowOutcome]:
@@ -1418,8 +1418,10 @@ class Repository:
         if min_outcome_date:
             stmt = stmt.where(ShadowOutcome.created_at >= min_outcome_date)
         if only_resolved:
-            stmt = stmt.where(ShadowOutcome.outcome.in_(["SHADOW_TARGET", "SHADOW_SL", "SHADOW_TIME_STOP"]))
-        stmt = stmt.order_by(ShadowOutcome.created_at.asc()).limit(limit)
+            stmt = stmt.where(ShadowOutcome.outcome.in_(["SHADOW_TARGET", "SHADOW_SL", "SHADOW_TIME_STOP", "SHADOW_EXPIRED"]))
+        stmt = stmt.order_by(ShadowOutcome.created_at.asc())
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

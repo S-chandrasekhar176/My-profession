@@ -27,6 +27,7 @@ class ScoreSignalRequest(BaseModel):
 class TrainModelRequest(BaseModel):
     use_synthetic_bootstrap_if_sparse: bool = Field(False, description="Augment with statistical bootstrap if live samples < 50")
     min_samples_threshold: int = Field(50, ge=10, le=1000)
+    limit: Optional[int] = Field(None, description="Maximum historical outcomes to load; None loads all available")
 
 
 @router.get("/status")
@@ -71,11 +72,11 @@ async def trigger_training(
     """Train M3a model using accumulated shadow_outcomes with walk-forward validation."""
     engine = get_inference_engine()
 
-    # Query all historical shadow outcomes from DB
+    # Query all historical shadow outcomes from DB (NF10-B: full dataset by default)
     outcomes = []
     try:
         if hasattr(repo, "get_shadow_outcomes_history"):
-            outcomes = await repo.get_shadow_outcomes_history(limit=500)
+            outcomes = await repo.get_shadow_outcomes_history(limit=req.limit)
         elif hasattr(repo, "get_shadow_outcomes_today"):
             outcomes = await repo.get_shadow_outcomes_today()
     except Exception as e:
@@ -90,8 +91,10 @@ async def trigger_training(
         )
         bootstrap = engine.builder.generate_synthetic_bootstrap(n_samples=req.min_samples_threshold)
         training_data = list(outcomes) + bootstrap
+        allow_synthetic = True
     else:
         training_data = list(outcomes)
+        allow_synthetic = False
 
     if len(training_data) < 20:
         raise HTTPException(
@@ -101,7 +104,7 @@ async def trigger_training(
 
     # Run training and walk-forward validation
     try:
-        report = engine.train(training_data, save_to_disk=True)
+        report = engine.train(training_data, save_to_disk=True, allow_synthetic=allow_synthetic)
         return {
             "status": "success",
             "message": f"M3a model trained successfully on {len(training_data)} samples",

@@ -76,57 +76,93 @@ class MLDatasetBuilder:
         self.means: Optional[np.ndarray] = None
         self.stds: Optional[np.ndarray] = None
 
-    def extract_row_features(self, outcome: Any) -> Tuple[List[float], int]:
-        """Convert a single ShadowOutcome object or dictionary into a feature vector and label."""
+    def extract_row_features(
+        self,
+        outcome: Any,
+        require_features: bool = False,
+    ) -> Optional[Tuple[List[float], int]]:
+        """Convert a single ShadowOutcome object or dictionary into a feature vector and label.
+
+        If require_features is True (used during dataset building / training), returns None
+        if features_json / continuous features are missing or unparseable, ensuring no
+        fabricated default vectors enter the training set (NF10-A).
+        If require_features is False (used during live scoring or test mocks), missing
+        features fall back to DEFAULT_FEATURE_VALUES without falsy 0.0 bugs.
+        """
         # Normalize dict vs ORM model
         if hasattr(outcome, "__dict__"):
             d = {k: v for k, v in outcome.__dict__.items() if not k.startswith("_")}
         elif isinstance(outcome, dict):
             d = outcome
         else:
-            d = {}
+            return None
 
         # Parse features_json if present
         extra_features: Dict[str, Any] = {}
-        if d.get("features_json"):
+        features_json_raw = d.get("features_json")
+        if features_json_raw:
             try:
-                extra_features = json.loads(d["features_json"])
+                parsed = json.loads(features_json_raw)
+                if isinstance(parsed, dict):
+                    extra_features = parsed
+                elif require_features:
+                    return None
             except Exception:
-                extra_features = {}
+                if require_features:
+                    return None
+        elif require_features and "atr_pct" not in d:
+            # If building dataset from DB rows and features_json is missing, exclude row (NF10-A)
+            return None
 
-        atr_pct = d.get("atr_pct") or extra_features.get("atr_pct") or DEFAULT_FEATURE_VALUES["atr_pct"]
-        vwap_dist = d.get("vwap_distance_pct") or extra_features.get("vwap_distance_pct") or DEFAULT_FEATURE_VALUES["vwap_distance_pct"]
-        trend_str = d.get("trend_strength") or extra_features.get("trend_strength") or DEFAULT_FEATURE_VALUES["trend_strength"]
-        liq_ratio = d.get("liquidity_ratio") or extra_features.get("liquidity_ratio") or DEFAULT_FEATURE_VALUES["liquidity_ratio"]
-        vix = d.get("vix_at_signal") or extra_features.get("vix") or DEFAULT_FEATURE_VALUES["vix"]
+        def _get_num(d_dict: Dict[str, Any], key: str, fallback: Optional[float] = None) -> Optional[float]:
+            if key in d_dict and d_dict[key] is not None:
+                try:
+                    return float(d_dict[key])
+                except (ValueError, TypeError):
+                    pass
+            return fallback
 
-        session_str = str(d.get("session_class") or extra_features.get("session_class") or "MORNING").upper()
-        session_code = SESSION_MAP.get(session_str, DEFAULT_FEATURE_VALUES["session_code"])
+        fb = None if require_features else DEFAULT_FEATURE_VALUES
 
-        htf_str = str(d.get("htf_trend") or extra_features.get("htf_trend") or "flat").lower()
-        htf_code = HTF_TREND_MAP.get(htf_str, DEFAULT_FEATURE_VALUES["htf_trend_code"])
+        # Extract features without 'or' falsy chains that turn legit 0.0 into defaults
+        atr_pct = _get_num(extra_features, "atr_pct", _get_num(d, "atr_pct", fb["atr_pct"] if fb else None))
+        vwap_dist = _get_num(extra_features, "vwap_distance_pct", _get_num(d, "vwap_distance_pct", fb["vwap_distance_pct"] if fb else None))
+        trend_str = _get_num(extra_features, "trend_strength", _get_num(d, "trend_strength", fb["trend_strength"] if fb else None))
+        liq_ratio = _get_num(extra_features, "liquidity_ratio", _get_num(d, "liquidity_ratio", fb["liquidity_ratio"] if fb else None))
+        vix = _get_num(extra_features, "vix", _get_num(d, "vix_at_signal", fb["vix"] if fb else 15.0))
 
-        regime_str = str(d.get("regime_at_signal") or "sideways").lower()
-        regime_code = REGIME_MAP.get(regime_str, DEFAULT_FEATURE_VALUES["regime_code"])
+        # When training, essential continuous features must be present
+        if require_features:
+            if atr_pct is None or vwap_dist is None or trend_str is None or liq_ratio is None:
+                return None
 
-        direction_str = str(d.get("direction") or "BUY").upper()
-        dir_code = DIRECTION_MAP.get(direction_str, DEFAULT_FEATURE_VALUES["direction_code"])
+        session_str = str(extra_features.get("session_class") or d.get("session_class") or "MORNING").upper()
+        session_code = SESSION_MAP.get(session_str, 2.0)
 
-        pcr = float(d.get("pcr") or extra_features.get("pcr") or DEFAULT_FEATURE_VALUES["pcr"])
-        iv_rank = float(d.get("iv_rank") or extra_features.get("iv_rank") or DEFAULT_FEATURE_VALUES["iv_rank"])
+        htf_str = str(extra_features.get("htf_trend") or d.get("htf_trend") or "flat").lower()
+        htf_code = HTF_TREND_MAP.get(htf_str, 0.0)
+
+        regime_str = str(extra_features.get("regime") or d.get("regime_at_signal") or "sideways").lower()
+        regime_code = REGIME_MAP.get(regime_str, 0.0)
+
+        direction_str = str(extra_features.get("direction") or d.get("direction") or "BUY").upper()
+        dir_code = DIRECTION_MAP.get(direction_str, 1.0)
+
+        pcr = _get_num(extra_features, "pcr", _get_num(d, "pcr", fb["pcr"] if fb else 1.0))
+        iv_rank = _get_num(extra_features, "iv_rank", _get_num(d, "iv_rank", fb["iv_rank"] if fb else 50.0))
 
         features = [
-            float(atr_pct),
-            float(vwap_dist),
-            float(trend_str),
-            float(liq_ratio),
-            float(vix),
+            float(atr_pct if atr_pct is not None else 1.2),
+            float(vwap_dist if vwap_dist is not None else 0.0),
+            float(trend_str if trend_str is not None else 0.0),
+            float(liq_ratio if liq_ratio is not None else 1.0),
+            float(vix if vix is not None else 15.0),
             float(session_code),
             float(htf_code),
             float(regime_code),
             float(dir_code),
-            float(pcr),
-            float(iv_rank),
+            float(pcr if pcr is not None else 1.0),
+            float(iv_rank if iv_rank is not None else 50.0),
         ]
 
         # Target label: 1 = Win (Target Hit or positive PnL), 0 = Loss (SL hit or negative PnL)
@@ -140,10 +176,24 @@ class MLDatasetBuilder:
         self,
         outcomes: List[Any],
         fit_scaler: bool = True,
+        allow_synthetic: Optional[bool] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Build feature matrix X (N, D) and target vector y (N)."""
+        """Build feature matrix X (N, D) and target vector y (N).
+        
+        Excludes rows lacking real features (NF10-A) and defensively prevents
+        synthetic bootstrap samples from mixing into live training datasets (NF10-C).
+        """
         if not outcomes:
             return np.empty((0, len(self.feature_names))), np.empty((0,))
+
+        # Determine effective synthetic allowance:
+        # If allow_synthetic is not explicitly passed, allow synthetic only if ALL outcomes are synthetic (e.g. test fixtures).
+        # If any real outcome is present, synthetic data can NEVER silently mix in.
+        has_real = any(
+            not (o.get("is_synthetic", False) if isinstance(o, dict) else getattr(o, "is_synthetic", False))
+            for o in outcomes
+        )
+        effective_allow_synthetic = allow_synthetic if allow_synthetic is not None else (not has_real)
 
         # Sort chronologically by created_at or registered_at if available
         def _get_time(o: Any) -> str:
@@ -155,22 +205,47 @@ class MLDatasetBuilder:
 
         x_rows: List[List[float]] = []
         y_rows: List[int] = []
+        included_count = 0
+        excluded_count = 0
+        excluded_synthetic = 0
 
         for out in sorted_outcomes:
-            feats, label = self.extract_row_features(out)
+            # Defensive synthetic filter (NF10-C)
+            is_syn = (
+                out.get("is_synthetic", False)
+                if isinstance(out, dict)
+                else getattr(out, "is_synthetic", False)
+            )
+            if is_syn and not effective_allow_synthetic:
+                excluded_synthetic += 1
+                continue
+
+            res = self.extract_row_features(out, require_features=True)
+            if res is None:
+                excluded_count += 1
+                continue
+
+            feats, label = res
             x_rows.append(feats)
             y_rows.append(label)
+            included_count += 1
+
+        msg = f"[ML Dataset] Built dataset: included: {included_count}, excluded: {excluded_count}"
+        if excluded_synthetic > 0:
+            msg += f", excluded_synthetic: {excluded_synthetic}"
+        logger.info(msg)
+        print(msg)
 
         X = np.array(x_rows, dtype=np.float64)
         y = np.array(y_rows, dtype=np.float64)
 
-        if fit_scaler:
+        if fit_scaler and len(X) > 0:
             self.means = np.mean(X, axis=0)
             self.stds = np.std(X, axis=0)
             # Avoid division by zero
             self.stds[self.stds < 1e-6] = 1.0
 
-        if self.means is not None and self.stds is not None:
+        if self.means is not None and self.stds is not None and len(X) > 0:
             X = (X - self.means) / self.stds
 
         return X, y
