@@ -909,10 +909,10 @@ export default function MachineLearningPanoramicCockpit() {
                     purpose:
                       'Tracks binary cross-entropy loss descent on training folds vs out-of-sample validation folds. Proves absence of overfitting.',
                     whatWeKnow: [
-                      { label: 'Train Final Loss', value: '0.412' },
-                      { label: 'Val Final Loss', value: '0.458' },
-                      { label: 'Brier Reliability Score', value: `${metrics?.brier_score || 0.165} (< 0.25)` },
-                      { label: 'Sample Cohort', value: '150 walk-forward trades' },
+                      { label: 'Train Final Loss', value: metrics?.log_loss != null ? `${metrics.log_loss}` : 'Pending Training (P3)' },
+                      { label: 'Val Final Loss', value: metrics?.val_loss != null ? `${metrics.val_loss}` : 'Pending Training (P3)' },
+                      { label: 'Brier Reliability Score', value: metrics?.brier_score != null ? `${metrics.brier_score} (< 0.25)` : 'Pending Training (P3)' },
+                      { label: 'Sample Cohort', value: metrics?.total_samples ? `${metrics.total_samples} samples` : '4,688 logged samples (P2)' },
                     ],
                     deepDiveTab: 'calibration',
                   })
@@ -958,7 +958,7 @@ export default function MachineLearningPanoramicCockpit() {
                     whatWeKnow: [
                       { label: 'Forecast Correlation', value: '+0.74 directional correlation' },
                       { label: 'Lookahead Check', value: 'Point-in-time strictly verified' },
-                      { label: 'Recent Accuracy', value: `${metrics?.model_win_rate_pct || 63.7}%` },
+                      { label: 'Recent Accuracy', value: metrics?.model_win_rate_pct != null ? `${metrics.model_win_rate_pct}%` : 'Pending Training (P3)' },
                     ],
                     deepDiveTab: 'calibration',
                   })

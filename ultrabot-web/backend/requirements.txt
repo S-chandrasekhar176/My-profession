@@ -31,6 +31,7 @@ apscheduler==3.10.4
 python-multipart==0.0.6
 pytest==7.4.3
 pytest-asyncio==0.23.2
+pytest-timeout>=2.3.0
 pyotp>=2.9.0
 # fyers-apiv3 is deliberately NOT listed here: its hard aiohttp/requests pins
 # conflict with this file under plain pip resolution. The SDK is installed

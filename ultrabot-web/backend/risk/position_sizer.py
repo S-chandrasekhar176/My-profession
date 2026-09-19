@@ -200,25 +200,39 @@ class PositionSizer:
         risk_per_unit = abs(entry_price - sl_price) if entry_price > 0 and sl_price > 0 else 0.0
         max_allowed_risk_rupees = self.total_capital * (self.hard_risk_pct / 100.0)
 
+        # Minimum Stop-Loss distance clamp (B2): prevent near-zero stop distances
+        # from artificially multiplying raw_risk_qty up to maximum capital caps.
+        min_sl_pct = float(self.config.get("min_sl_pct", 0.5))
+        min_risk_per_unit = (entry_price * (min_sl_pct / 100.0)) if entry_price > 0 else 0.0
+        clamped_risk_per_unit = max(risk_per_unit, min_risk_per_unit)
+        if risk_per_unit > 0 and clamped_risk_per_unit > risk_per_unit:
+            notes_parts.append(
+                f"SL distance ₹{risk_per_unit:.2f} ({risk_per_unit/entry_price*100:.2f}%) clamped to min {min_sl_pct:.2f}% floor (₹{min_risk_per_unit:.2f}) to prevent position ballooning"
+            )
+
         if self.method == "risk_based":
             # Risk-Based Sizing: size directly from risk budget (|entry - sl| distance)
             risk_scale = (adjusted_fraction / self.kelly_max) if self.kelly_max > 0 else 1.0
             target_risk_rupees = max_allowed_risk_rupees * min(1.0, max(0.2, risk_scale))
 
             lot_size = get_lot_size(symbol) if is_fno else None
-            if risk_per_unit > 0 and entry_price > 0:
-                raw_risk_qty = int(target_risk_rupees / risk_per_unit)
+            if clamped_risk_per_unit > 0 and entry_price > 0:
+                raw_risk_qty = int(target_risk_rupees / clamped_risk_per_unit)
                 max_capital_for_pos = min(actual_usable, max_single)
                 max_qty_by_capital = int(max_capital_for_pos / entry_price)
 
                 target_qty = min(raw_risk_qty, max_qty_by_capital)
                 if is_fno and lot_size and lot_size > 0:
                     quantity = (target_qty // lot_size) * lot_size
+                    if target_qty > 0 and quantity == 0:
+                        notes_parts.append(
+                            f"Target quantity {target_qty} is below F&O lot size {lot_size}; rounded to 0 lots"
+                        )
                 else:
                     quantity = max(0, target_qty)
 
                 notes_parts.append(
-                    f"Risk-based sizing: allocated {quantity} shares (Target Risk: ₹{target_risk_rupees:,.0f} / actual risk: ₹{risk_per_unit * quantity:,.0f})"
+                    f"Risk-based sizing: allocated {quantity} shares (Target Risk: ₹{target_risk_rupees:,.0f} / actual risk: ₹{clamped_risk_per_unit * quantity:,.0f})"
                 )
             else:
                 quantity, lot_size = self._to_quantity(symbol, position_size, entry_price, is_fno=is_fno)

@@ -5868,6 +5868,14 @@ class UltraBotEngine:
                 "exit_time": t.exit_time,
             })
 
+            # Multi-timeframe / all-time stats
+            all_time_pnl = {}
+            try:
+                fee_summary = await repo.get_multi_timeframe_fee_summary()
+                all_time_pnl = fee_summary.get("overall", {})
+            except Exception:
+                all_time_pnl = {}
+
         # Risk state
         risk_state = {}
         try:
@@ -5931,6 +5939,7 @@ class UltraBotEngine:
                 "unrealized_pnl": round(total_unrealized_pnl, 2),
             },
             "daily_pnl": pnl_data,
+            "all_time_pnl": all_time_pnl,
             "risk": risk_state,
             "open_positions": positions_data,
             "open_position_count": len(open_positions),

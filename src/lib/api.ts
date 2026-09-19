@@ -946,6 +946,9 @@ export interface MlScorecardMetrics {
   baseline_win_rate_pct?: number | null;
   model_win_rate_pct?: number | null;
   roc_auc?: number | null;
+  log_loss?: number | null;
+  val_loss?: number | null;
+  total_samples?: number;
   avg_vix?: number;
   veto_savings_estimate: number;
   drift_status: 'stable' | 'moderate' | 'high' | 'HEALTHY' | string;

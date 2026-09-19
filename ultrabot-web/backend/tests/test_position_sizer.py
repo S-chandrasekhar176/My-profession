@@ -186,3 +186,20 @@ class TestPositionSizerBasic:
         assert result.position_size == 25000.0
         assert result.risk_amount == 25 * 20.0  # 500 INR <= 1000 hard risk
         assert result.risk_pct <= 1.0
+
+    def test_risk_based_min_sl_clamp(self):
+        """Verify that an unrealistically tight SL (e.g. 0.1% away) is clamped
+        by min_sl_pct (default 0.5%) to prevent risk ballooning.
+        """
+        cfg = dict(SIZING_CONFIG)
+        cfg["method"] = "risk_based"
+        cfg["min_sl_pct"] = 0.5
+        sizer = PositionSizer(cfg, CAPITAL_CONFIG)
+        # Entry 1000, SL 999 -> distance is only 1 INR (0.1%), clamped to 5 INR (0.5%)
+        # Budget = 1,000 INR -> raw_risk_qty with clamp = 1000 / 5 = 200 shares
+        # Value = 200 * 1000 = 200,000 (capped by max_per_position_pct 25% = 25,000 -> 25 shares)
+        signal = make_signal(symbol="TCS", confidence=0.85, entry_price=1000.0, sl_price=999.0, segment="EQ")
+        ctx = {"vix": 12.0, "current_drawdown_pct": 1.0, "available_capital": 100000.0}
+        result = sizer.calculate(signal, ctx)
+        assert result.quantity == 25
+        assert result.notes is not None and "clamped to min 0.50% floor" in result.notes

@@ -105,11 +105,22 @@ async def get_dashboard(
             total_invested += invested
             total_unrealized_pnl += unrealized
 
-        # Capital
+        # Capital (respect carry_forward_capital from prior daily_summary)
         capital_config = settings.get_capital_config()
-        total_capital = capital_config.get("virtual_capital", 100000)
+        total_capital = float(capital_config.get("virtual_capital", 500000.0))
+        if bool(capital_config.get("carry_forward_capital", False)):
+            try:
+                prior_summary = await repo.get_latest_daily_summary()
+                if prior_summary and getattr(prior_summary, "ending_capital", None) and prior_summary.ending_capital > 0:
+                    total_capital = float(prior_summary.ending_capital)
+            except Exception:
+                pass
         capital_available = total_capital - total_invested
         capital_usage_pct = round(total_invested / total_capital * 100, 2) if total_capital > 0 else 0
+
+        # Multi-timeframe fee and P&L summary (all-time trades)
+        fee_summary = await repo.get_multi_timeframe_fee_summary()
+        all_time_pnl = fee_summary.get("overall", {})
 
         # Today's trades
         todays_trades = await repo.get_todays_trades()
@@ -185,6 +196,7 @@ async def get_dashboard(
                 "unrealized_pnl": round(total_unrealized_pnl, 2),
             },
             "daily_pnl": pnl_data,
+            "all_time_pnl": all_time_pnl,
             "risk": risk_summary,
             "open_positions": positions_data,
             "open_position_count": len(open_positions),
