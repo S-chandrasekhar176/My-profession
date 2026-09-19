@@ -277,6 +277,15 @@ export default function MachineLearningPanoramicCockpit() {
   const [activeTab, setActiveTab] = useState<MlSubTab>('profit_loss');
   const [selectedInspectorItem, setSelectedInspectorItem] = useState<EvidenceItem | null>(null);
 
+  // Broker status resolution (reads /api/brokers array structure)
+  const brokerArr = Array.isArray(brokerStatus?.brokers) ? brokerStatus.brokers : [];
+  const activeBroker = brokerArr.find((b: any) => b.is_active) ?? brokerArr[0];
+  const brokerName = activeBroker?.broker ? String(activeBroker.broker).toUpperCase() : 'PAPER BROKER';
+  const isBrokerConnected = activeBroker ? activeBroker.auth_status === 'connected' : false;
+
+  // Real Gate G21 Veto Threshold (dynamic from scorecard metrics or latest evaluation)
+  const vetoThreshold = metrics?.veto_threshold ?? evaluations?.[0]?.veto_threshold ?? 0.40;
+
   // Cyber Terminal Logs (Honest Real-Time State)
   const [terminalLogs, setTerminalLogs] = useState<string[]>([
     '[INIT] ULTRABOT ML ENGINE V4 ONLINE',
@@ -295,10 +304,10 @@ export default function MachineLearningPanoramicCockpit() {
     const logs: string[] = [
       '[INIT] ULTRABOT ML ENGINE V4 ONLINE',
       `[ENGINE] STATE: ${(engineStatus?.state || 'STOPPED').toUpperCase()} | UPTIME: ${engineStatus?.uptime != null ? `${Math.round(engineStatus.uptime)}s` : '0s'}`,
-      `[BROKER] ${brokerStatus?.name ? String(brokerStatus.name).toUpperCase() : 'PAPER BROKER'} | CONNECTED: ${brokerStatus?.connected ? 'YES' : 'SIMULATED'}`,
+      `[BROKER] ${brokerName} | CONNECTED: ${isBrokerConnected ? 'YES' : 'SIMULATED'}`,
       `[SOAK] PHASE: P2 DATA FOUNDATION ACTIVE`,
       `[VIX FEED] INDIA VIX: ${metrics?.avg_vix != null ? Number(metrics.avg_vix).toFixed(2) : 'PENDING'}`,
-      `[GATE G21] VETO THRESHOLD: 0.40 (ACTIVE)`,
+      `[GATE G21] VETO THRESHOLD: ${Number(vetoThreshold).toFixed(2)} (ACTIVE)`,
     ];
 
     if (evaluations && evaluations.length > 0) {
@@ -315,7 +324,7 @@ export default function MachineLearningPanoramicCockpit() {
     }
 
     setTerminalLogs(logs);
-  }, [engineStatus, brokerStatus, metrics, evaluations]);
+  }, [engineStatus, brokerStatus, metrics, evaluations, brokerName, isBrokerConnected, vetoThreshold]);
 
   const fetchData = async () => {
     try {
@@ -1208,7 +1217,7 @@ export default function MachineLearningPanoramicCockpit() {
                         purpose:
                           'Supervises engine threads, WebSocket subscriptions, risk gate pipeline, and broker authorization state.',
                         whatWeKnow: [
-                          { label: 'Broker Authorization', value: brokerStatus?.authenticated ? 'Authenticated (Active Token)' : 'Live / Paper Mock' },
+                          { label: 'Broker Authorization', value: isBrokerConnected ? `Authenticated (${brokerName})` : 'Live / Paper Mock' },
                           { label: 'Engine Mode', value: 'LIVE AUTO-TRADING' },
                           { label: 'Uptime', value: 'Market Hours Session' },
                         ],

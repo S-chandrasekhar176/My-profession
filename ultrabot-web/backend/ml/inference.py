@@ -322,6 +322,8 @@ class MLInferenceEngine:
             "drift_metric_value": round(float(abs(avg_recent_vix - 15.0) / 100.0), 2) if avg_recent_vix else 0.04,
             "avg_vix": round(avg_recent_vix, 1),
             "calibration_curve": curve_points,
+            "veto_threshold": self.veto_threshold,
+            "favorable_threshold": self.favorable_threshold,
             "model_version": self.version,
             "is_fitted": self.model.is_fitted,
         }
