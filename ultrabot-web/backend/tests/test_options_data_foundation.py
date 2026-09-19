@@ -9,6 +9,7 @@ Validates:
 """
 import asyncio
 from datetime import datetime
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
@@ -509,5 +510,48 @@ async def test_recorder_health_and_session_cleanup(async_session):
     assert health["rate_limit_hits_429"] == 0
     assert health["last_poll_seconds_ago"] is not None
     assert "NIFTY" in health["last_verification"]
+
+
+def test_recorder_metrics_staleness_gating():
+    """Verify OptionChainRecorder staleness gate (<300s -> fresh, >300s -> stale default)."""
+    recorder = OptionChainRecorder(symbols=["NIFTY", "BANKNIFTY"])
+    now = time.time()
+
+    # 1. Fresh metric (<300s)
+    recorder.latest_metrics["NIFTY"] = {
+        "symbol": "NIFTY",
+        "pcr": 1.25,
+        "iv": 0.18,
+        "iv_rank": 45.0,
+        "timestamp": now - 60.0,
+    }
+    m = recorder.get_latest_metrics("NIFTY")
+    assert m["stale"] is False
+    assert m["pcr"] == 1.25
+    assert m["iv_rank"] == 45.0
+
+    # 2. Aged metric (>300s) -> falls through to default with stale: True
+    recorder.latest_metrics["NIFTY"]["timestamp"] = now - 350.0
+    stale_m = recorder.get_latest_metrics("NIFTY")
+    assert stale_m["stale"] is True
+    assert stale_m["pcr"] == 1.0
+    assert stale_m["iv_rank"] == 50.0
+
+
+def test_recorder_iv_rank_empirical_bounds():
+    """Verify _compute_iv_rank:
+    1. BANKNIFTY raw_iv=0.20 -> ≈34.8 (proves pinned-at-100 bug stays dead).
+    2. Input below min -> expands lower bound and evaluates to 0.0.
+    """
+    recorder = OptionChainRecorder(symbols=["NIFTY", "BANKNIFTY"])
+    # BANKNIFTY bounds seeded as (0.12, 0.35)
+    ivr = recorder._compute_iv_rank("BANKNIFTY", current_iv=0.20)
+    assert ivr == pytest.approx(34.8, abs=0.5)
+
+    # Input below min: 0.08 < 0.12 -> bound expands to (0.08, 0.35), rank = 0.0
+    ivr_low = recorder._compute_iv_rank("BANKNIFTY", current_iv=0.08)
+    assert ivr_low == 0.0
+    assert recorder._iv_bounds["BANKNIFTY"][0] == 0.08
+
 
 

@@ -211,9 +211,19 @@ def _canonical_symbol(symbol: str) -> str:
     return s
 
 
+_INDEX_LOT_SIZES: Dict[str, int] = {
+    "NIFTY": 75,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 65,
+    "MIDCPNIFTY": 120,
+    "SENSEX": 20,
+}
+
+
 def is_fno_stock(symbol: str) -> bool:
-    """Check if a symbol is part of the F&O universe."""
-    return _canonical_symbol(symbol) in _FNO_SYMBOLS
+    """Check if a symbol is part of the F&O universe (including major indices)."""
+    sym = _canonical_symbol(symbol)
+    return sym in _FNO_SYMBOLS or sym in _INDEX_LOT_SIZES
 
 
 def is_fno_tradeable(symbol: str) -> bool:
@@ -225,7 +235,7 @@ def is_fno_tradeable(symbol: str) -> bool:
     touches derivatives.
     """
     sym = _canonical_symbol(symbol)
-    return sym in _FNO_SYMBOLS and sym not in _CASH_ONLY_SYMBOLS
+    return (sym in _FNO_SYMBOLS or sym in _INDEX_LOT_SIZES) and sym not in _CASH_ONLY_SYMBOLS
 
 
 def is_cash_only(symbol: str) -> bool:
@@ -244,8 +254,11 @@ def get_stock_industry(symbol: str) -> Optional[str]:
 
 
 def get_lot_size(symbol: str) -> int:
-    """Get the F&O lot size for a stock. Returns 1 if not found."""
-    return _LOT_SIZE_MAP.get(_canonical_symbol(symbol), 1)
+    """Get the F&O lot size for a stock or index. Returns 1 if not found."""
+    sym = _canonical_symbol(symbol)
+    if sym in _INDEX_LOT_SIZES:
+        return _INDEX_LOT_SIZES[sym]
+    return _LOT_SIZE_MAP.get(sym, 1)
 
 
 def get_stock_info(symbol: str) -> Optional[Dict]:

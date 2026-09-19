@@ -12,8 +12,12 @@ Trailing SL is ratchet-protected: it only moves forward with new peaks, never re
 from typing import Any, Dict, List, Optional, Union
 from types import SimpleNamespace
 import json
+import logging
 from models.risk_state import BookingLevels, BookingResult
 from utils.direction import is_long_direction
+from utils.market_utils import get_lot_size, is_fno_stock
+
+logger = logging.getLogger(__name__)
 
 
 class PartialBooker:
@@ -353,6 +357,10 @@ class PartialBooker:
 
         levels = self.calculate_booking_levels(position)
 
+        symbol = str(getattr(position, "symbol", "") or "")
+        is_fno = is_fno_stock(symbol) if symbol else False
+        lot_size = get_lot_size(symbol) if (is_fno and symbol) else 0
+
         triggered_level: Optional[int] = None
         book_pct: float = 0.0
         book_qty: int = 0
@@ -371,31 +379,57 @@ class PartialBooker:
         elif move_pct >= lvl2.trigger_pct and 2 not in stages_fired:
             triggered_level = 2
             stage_name = lvl2.stage_name
-            if initial_qty < self.min_partial_qty:
-                book_pct = 0.0
-                book_qty = 0
-            else:
-                book_pct = lvl2.book_pct
-                book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
-                current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
-                if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
-                    book_qty = 1
+            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+            if is_fno and lot_size > 0:
+                raw_book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
+                book_qty = (raw_book_qty // lot_size) * lot_size
                 book_qty = min(book_qty, current_qty)
+                if raw_book_qty > 0 and book_qty == 0:
+                    book_pct = 0.0
+                    logger.debug(
+                        "Partial booker Stage 2: target book qty %d is below F&O lot size %d for %s; rounded to 0 lots",
+                        raw_book_qty, lot_size, symbol,
+                    )
+                else:
+                    book_pct = lvl2.book_pct
+            else:
+                if initial_qty < self.min_partial_qty:
+                    book_pct = 0.0
+                    book_qty = 0
+                else:
+                    book_pct = lvl2.book_pct
+                    book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
+                    if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                        book_qty = 1
+                    book_qty = min(book_qty, current_qty)
             stages_fired.append(2)
 
         elif move_pct >= lvl3.trigger_pct and 3 not in stages_fired:
             triggered_level = 3
             stage_name = lvl3.stage_name
-            if initial_qty < self.min_partial_qty:
-                book_pct = 0.0
-                book_qty = 0
-            else:
-                book_pct = lvl3.book_pct
-                book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
-                current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
-                if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
-                    book_qty = 1
+            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+            if is_fno and lot_size > 0:
+                raw_book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
+                book_qty = (raw_book_qty // lot_size) * lot_size
                 book_qty = min(book_qty, current_qty)
+                if raw_book_qty > 0 and book_qty == 0:
+                    book_pct = 0.0
+                    logger.debug(
+                        "Partial booker Stage 3: target book qty %d is below F&O lot size %d for %s; rounded to 0 lots",
+                        raw_book_qty, lot_size, symbol,
+                    )
+                else:
+                    book_pct = lvl3.book_pct
+            else:
+                if initial_qty < self.min_partial_qty:
+                    book_pct = 0.0
+                    book_qty = 0
+                else:
+                    book_pct = lvl3.book_pct
+                    book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
+                    if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                        book_qty = 1
+                    book_qty = min(book_qty, current_qty)
             stages_fired.append(3)
 
         elif move_pct >= lvl4.trigger_pct and 4 not in stages_fired:

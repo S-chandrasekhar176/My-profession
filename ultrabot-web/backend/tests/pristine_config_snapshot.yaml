@@ -136,6 +136,7 @@ partial_booking:
   trailing_step_pct: 0.5
 position_sizing:
   method: risk_based
+  min_sl_pct: 0.5
   kelly_min_fraction: 0.02
   kelly_max_fraction: 0.08
   hard_risk_pct: 1.0

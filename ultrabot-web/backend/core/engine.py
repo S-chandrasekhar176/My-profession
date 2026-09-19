@@ -2315,7 +2315,8 @@ class UltraBotEngine:
                     veto_prob = opportunity.get("ml_win_probability")
                     if veto_prob is None:
                         veto_prob = (opportunity.get("ml_score") or 0.0) * 100.0
-                    veto_reason = f"M3a ML model VETO: win probability {veto_prob:.1f}% < 40%"
+                    threshold_pct = float(risk_cfg.get("ml_veto_threshold", 0.40)) * 100.0
+                    veto_reason = f"M3a ML model VETO: win probability {veto_prob:.1f}% < {threshold_pct:.0f}%"
                     logger.info(
                         "Signal %s/%s rejected by Gate G21_ML_Veto: %s",
                         strategy_name, symbol, veto_reason,

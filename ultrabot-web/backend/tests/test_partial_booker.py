@@ -343,3 +343,41 @@ class TestAdaptiveBooking:
         assert r2.current_trailing_sl == 10070.0  # Trailing SL still advanced!
         assert pos.stop_loss == 10070.0
 
+
+class TestFnoLotRounding:
+    def test_single_lot_fno_sub_lot_rounding(self, booker):
+        """For NIFTY (lot 75), 1 lot position (75 qty) should NOT book 19 shares.
+        Book quantity is rounded down to 0 lots, but trailing SL still ratchets forward.
+        """
+        pos = make_position(entry=24500.0, sl=24300.0, quantity=75)
+        pos.symbol = "NIFTY"
+
+        # Stage 1: Breakeven lock (+0.5% at 24622.5)
+        r1 = booker.check_and_book(pos, current_price=24625.0)
+        assert r1.triggered_level == 1
+        assert r1.book_qty == 0
+
+        # Stage 2: (+1.0% at 24745.0) -> 25% of 75 = 18.75 -> 19 shares -> below 75 -> 0 lots
+        r2 = booker.check_and_book(pos, current_price=24750.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 0
+        assert r2.book_pct == 0.0
+        assert r2.remaining_qty == 75
+        assert r2.trailing_sl_active is True
+        assert pos.stop_loss == pytest.approx(24500.0 * 1.007, abs=1.0)
+
+    def test_multi_lot_fno_rounds_to_lot_multiples(self, booker):
+        """For NIFTY (lot 75), 4 lots (300 qty):
+        Stage 2 (25%): 75 shares -> 1 lot booked.
+        """
+        pos = make_position(entry=24500.0, sl=24300.0, quantity=300)
+        pos.symbol = "NIFTY"
+        pos.stages_fired = [1]
+
+        # Stage 2: 25% of 300 = 75 shares = exactly 1 lot
+        r2 = booker.check_and_book(pos, current_price=24750.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 75
+        assert r2.remaining_qty == 225
+
+

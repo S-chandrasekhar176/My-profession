@@ -647,9 +647,9 @@ export default function MachineLearningPanoramicCockpit() {
                         purpose:
                           'Feeds market-wide expected 30-day volatility into Kelly sizing and drift PSI detection.',
                         whatWeKnow: [
-                          { label: 'India VIX', value: `${metrics?.avg_vix || 14.80}` },
+                          { label: 'India VIX', value: metrics?.avg_vix != null ? `${Number(metrics.avg_vix).toFixed(2)}` : 'Pending Feed' },
                           { label: 'Regime Status', value: 'NORMAL (< 18.0)' },
-                          { label: 'Drift PSI', value: `${metrics?.drift_metric_value || 0.04} (HEALTHY)` },
+                          { label: 'Drift PSI', value: metrics?.drift_metric_value != null ? `${Number(metrics.drift_metric_value).toFixed(3)} (${Number(metrics.drift_metric_value) < 0.1 ? 'HEALTHY' : 'DRIFT'})` : 'Pending Training (P3)' },
                         ],
                         deepDiveTab: 'calibration',
                       })
@@ -847,7 +847,7 @@ export default function MachineLearningPanoramicCockpit() {
                         whatWeKnow: [
                           { label: 'Veto Threshold', value: 'Score < 0.42' },
                           { label: 'Favorable Threshold', value: 'Score >= 0.60' },
-                          { label: 'Capital Saved by Vetoes', value: `₹${(metrics?.veto_savings_estimate || 8750).toLocaleString('en-IN')}` },
+                          { label: 'Capital Saved by Vetoes', value: metrics?.veto_savings_estimate != null ? `₹${Number(metrics.veto_savings_estimate).toLocaleString('en-IN')}` : 'Pending (P2 shadow)' },
                         ],
                         deepDiveTab: 'evaluations',
                       })
@@ -912,7 +912,7 @@ export default function MachineLearningPanoramicCockpit() {
                       { label: 'Train Final Loss', value: metrics?.log_loss != null ? `${metrics.log_loss}` : 'Pending Training (P3)' },
                       { label: 'Val Final Loss', value: metrics?.val_loss != null ? `${metrics.val_loss}` : 'Pending Training (P3)' },
                       { label: 'Brier Reliability Score', value: metrics?.brier_score != null ? `${metrics.brier_score} (< 0.25)` : 'Pending Training (P3)' },
-                      { label: 'Sample Cohort', value: metrics?.total_samples ? `${metrics.total_samples} samples` : (metrics?.total_evaluations ? `${metrics.total_evaluations} logged samples (P2)` : '4,688 logged samples (P2)') },
+                      { label: 'Sample Cohort', value: metrics?.total_samples ? `${metrics.total_samples} samples` : (metrics?.total_evaluations ? `${metrics.total_evaluations} logged samples (P2)` : 'Pending Ingestion') },
                     ],
                     deepDiveTab: 'calibration',
                   })
@@ -1035,7 +1035,7 @@ export default function MachineLearningPanoramicCockpit() {
                             whatWeKnow: [
                               { label: 'Symbol', value: ev.symbol },
                               { label: 'Direction', value: ev.direction || 'BUY' },
-                              { label: 'Win Probability', value: `${((ev.win_probability || ev.score * 100) || 68.4).toFixed(1)}%` },
+                              { label: 'Win Probability', value: ev.win_probability != null ? `${Number(ev.win_probability).toFixed(1)}%` : (ev.score != null ? `${(Number(ev.score) * 100).toFixed(1)}%` : 'Pending / Unscored') },
                               { label: 'Decision', value: isVeto ? 'VETO (Blocked by Gate G21)' : 'PASS (Dispatched to Fyers API)' },
                             ],
                             deepDiveTab: 'evaluations',
