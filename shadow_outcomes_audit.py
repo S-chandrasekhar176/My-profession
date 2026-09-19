@@ -8,6 +8,7 @@ Evaluates:
   3. Duplicate resolutions
   4. Label balance (win/loss distribution)
   5. Look-ahead leakage (timestamps & post-entry leakage keys)
+  6. Signals coverage (report-only cross-check)
 """
 import argparse
 import json
@@ -33,8 +34,8 @@ def run_audit(db_path: str, json_out_path: str) -> int:
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except Exception as e:
-        print(f"[!] Read-only URI connect failed ({e}), opening standard connection...")
-        conn = sqlite3.connect(db_path)
+        print(f"[!] Could not open database read-only ({e}). Aborting — audit never writes.")
+        return 2
 
     cursor = conn.cursor()
 
@@ -85,12 +86,27 @@ def run_audit(db_path: str, json_out_path: str) -> int:
 
     # 5. Look-Ahead Leakage Check
     leakage_records: List[Dict[str, Any]] = []
-    forbidden_keys = {"pnl", "pnl_per_share", "net_pnl", "mfe", "mae", "exit_price", "exit_time"}
+    forbidden_keys = {
+        "pnl", "pnl_per_share", "net_pnl", "realized_pnl", "gross_pnl",
+        "mfe", "mae", "exit_price", "exit_time", "exit_ts", "exit_reason",
+        "outcome", "result", "label", "holding_period", "final_price"
+    }
+
+    def _is_leak_key(k: Any) -> bool:
+        kl = str(k).lower()
+        return (
+            kl in forbidden_keys
+            or "pnl" in kl
+            or kl.startswith("exit_")
+            or kl in {"mfe", "mae", "holding_period"}
+        )
+
     key_leakage_count = 0
     ts_leakage_count = 0
+    ts_compared = 0
 
-    for r in rows:
-        row_id = r[col_idx["id"]]
+    for i, r in enumerate(rows):
+        row_id = r[col_idx["id"]] if "id" in col_idx else f"row#{i}"
         if row_id in id_seen:
             dup_ids.append(row_id)
         else:
@@ -138,8 +154,8 @@ def run_audit(db_path: str, json_out_path: str) -> int:
                     if v is None:
                         null_field_counts[k] = null_field_counts.get(k, 0) + 1
 
-                # Look-ahead check: forbidden keys
-                found_forbidden = [k for k in forbidden_keys if k in feat_obj]
+                # Look-ahead check: forbidden keys (widened regex/substring check)
+                found_forbidden = [k for k in feat_obj if _is_leak_key(k)]
                 if found_forbidden:
                     key_leakage_count += 1
                     leakage_records.append({
@@ -151,6 +167,7 @@ def run_audit(db_path: str, json_out_path: str) -> int:
                 comp_at_str = feat_obj.get("computed_at")
                 reg_at_str = r[col_idx.get("registered_at")] if "registered_at" in col_idx else None
                 if comp_at_str and reg_at_str:
+                    ts_compared += 1
                     try:
                         # Clean ISO formats with timezone
                         c_ts = datetime.fromisoformat(comp_at_str.replace("Z", "+00:00"))
@@ -166,6 +183,18 @@ def run_audit(db_path: str, json_out_path: str) -> int:
                         pass
             except Exception:
                 features_parse_error_count += 1
+
+    # 6. Signals-Side Coverage (Report-Only)
+    signals_count, orphans = None, None
+    try:
+        cur2 = conn.cursor()
+        if cur2.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='shadow_signals'").fetchone() \
+                and "signal_id" in col_idx:
+            signals_count = cur2.execute("SELECT COUNT(*) FROM shadow_signals").fetchone()[0]
+            db_sigs = {r[0] for r in cur2.execute("SELECT signal_id FROM shadow_signals")}
+            orphans = len(set(sig_seen) - db_sigs)
+    except sqlite3.Error:
+        pass
 
     conn.close()
 
@@ -198,7 +227,14 @@ def run_audit(db_path: str, json_out_path: str) -> int:
     print(f"\n[5] LOOK-AHEAD LEAKAGE:")
     print(f"    - Post-entry forbidden key leaks: {key_leakage_count}")
     print(f"    - Timestamp look-ahead violations: {ts_leakage_count}")
+    print(f"    - Timestamp rows compared: {ts_compared}")
     print(f"    - Total Leakage Incidents: {len(leakage_records)}")
+
+    if signals_count is not None:
+        print(f"\n[6] SIGNALS COVERAGE (REPORT-ONLY):")
+        print(f"    - Total shadow signals: {signals_count}")
+        print(f"    - Distinct outcome signals: {len(sig_seen)}")
+        print(f"    - Orphan outcome signal IDs: {orphans}")
 
     # Decision Matrix
     is_blocked = False
@@ -220,6 +256,12 @@ def run_audit(db_path: str, json_out_path: str) -> int:
     if features_parse_error_count > 0:
         is_blocked = True
         reasons_blocked.append(f"Found {features_parse_error_count} corrupted features_json strings")
+
+    # Honest verifiable checks
+    if "registered_at" not in col_idx:
+        warnings.append("Timestamp look-ahead NOT VERIFIABLE — 'registered_at' column missing")
+    elif ts_compared == 0:
+        warnings.append("Timestamp look-ahead NOT VERIFIABLE — no rows had both timestamps")
 
     if win_rate_pct < 20.0 or win_rate_pct > 80.0:
         warnings.append(f"Heavily imbalanced win rate: {win_rate_pct}%")
@@ -278,7 +320,13 @@ def run_audit(db_path: str, json_out_path: str) -> int:
         "look_ahead": {
             "key_leakage_count": key_leakage_count,
             "timestamp_leakage_count": ts_leakage_count,
+            "timestamp_rows_compared": ts_compared,
             "total_leakage_count": len(leakage_records),
+        },
+        "signals_coverage": {
+            "signals_count": signals_count,
+            "distinct_outcome_signals": len(sig_seen),
+            "orphan_outcome_signal_ids": orphans,
         },
         "reasons_blocked": reasons_blocked,
         "warnings": warnings,

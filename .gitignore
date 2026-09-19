@@ -48,6 +48,7 @@ defaults.local.yaml
 *.zip
 *.pdf
 reports/
+report.json
 download/
 upload/
 

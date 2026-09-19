@@ -43,9 +43,15 @@
   "look_ahead": {
     "key_leakage_count": 0,
     "timestamp_leakage_count": 0,
+    "timestamp_rows_compared": 4661,
     "total_leakage_count": 0
+  },
+  "signals_coverage": {
+    "signals_count": null,
+    "distinct_outcome_signals": 682,
+    "orphan_outcome_signal_ids": null
   },
   "reasons_blocked": [],
   "warnings": [],
-  "generated_at": "2026-09-19T21:05:42.687459"
+  "generated_at": "2026-09-19T21:33:57.538928"
 }
