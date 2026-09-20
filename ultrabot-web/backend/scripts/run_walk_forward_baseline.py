@@ -4,11 +4,13 @@ Loads empirical point-in-time shadow outcomes from the database, executes strict
 chronological cross-validation to eliminate lookahead bias, computes calibration
 scorecards, and trains the baseline M3a model.
 """
+import asyncio
 import json
 import logging
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any, List
 
 # Add backend directory to sys.path
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -38,29 +40,39 @@ def find_database_path() -> Path:
     raise FileNotFoundError("Could not locate active ultrabot.db SQLite database")
 
 
+async def load_outcomes_from_repo() -> List[Any]:
+    """Load all resolved shadow outcomes via Repository (NF11-A)."""
+    from db.database import async_session_factory
+    from db.repository import Repository
+    async with async_session_factory() as session:
+        repo = Repository(session)
+        return await repo.get_shadow_outcomes_history(limit=None, only_resolved=True)
+
+
 def run():
-    db_path = find_database_path()
-    logger.info("Connecting to database at %s", db_path)
-    
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    # Query resolved shadow outcomes
-    query = """
-        SELECT * FROM shadow_outcomes
-        WHERE outcome IN ('SHADOW_TARGET', 'SHADOW_SL', 'SHADOW_TIME_STOP')
-        ORDER BY created_at ASC
-    """
-    rows = c.execute(query).fetchall()
-    total_found = len(rows)
-    logger.info("Found %d resolved shadow outcomes in database", total_found)
-    
+    logger.info("Loading resolved shadow outcomes from repository (NF11-A single source of truth)...")
+    try:
+        outcomes = asyncio.run(load_outcomes_from_repo())
+        logger.info("Loaded %d resolved shadow outcomes from Repository", len(outcomes))
+    except Exception as exc:
+        logger.warning("Repository load failed (%s); falling back to direct SQLite", exc)
+        db_path = find_database_path()
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        query = """
+            SELECT * FROM shadow_outcomes
+            WHERE outcome IN ('SHADOW_TARGET', 'SHADOW_SL', 'SHADOW_TIME_STOP', 'SHADOW_EXPIRED')
+            ORDER BY created_at ASC
+        """
+        rows = c.execute(query).fetchall()
+        outcomes = [dict(r) for r in rows]
+        logger.info("Loaded %d resolved shadow outcomes via SQLite fallback", len(outcomes))
+
+    total_found = len(outcomes)
     if total_found < 20:
         logger.warning("Fewer than 20 resolved outcomes found (%d); aborting walk-forward run", total_found)
         return
-
-    outcomes = [dict(r) for r in rows]
     
     # Build dataset
     engine = get_inference_engine()
