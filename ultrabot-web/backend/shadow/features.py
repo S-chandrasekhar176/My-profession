@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-FEATURES_SCHEMA_VERSION = "v1"
+FEATURES_SCHEMA_VERSION = "1.1"
 
 # IST intraday session buckets (market hours 09:15–15:30 IST).
 SESSION_OPENING_DRIVE = "OPENING_DRIVE"   # 09:15 - 10:00
@@ -189,7 +189,14 @@ def compute_liquidity_ratio(df: Optional[pd.DataFrame]) -> Optional[float]:
         return None
 
 
-def compute_feature_snapshot(df: Optional[pd.DataFrame], now: Any = None) -> Dict[str, Any]:
+def compute_feature_snapshot(
+    df: Optional[pd.DataFrame],
+    now: Any = None,
+    *,
+    vix: Optional[float] = None,
+    pcr: Optional[float] = None,
+    iv_rank: Optional[float] = None,
+) -> Dict[str, Any]:
     """Assemble the full point-in-time snapshot. Never raises.
 
     Returns a JSON-safe dict; every numeric feature is None when its inputs
@@ -208,6 +215,9 @@ def compute_feature_snapshot(df: Optional[pd.DataFrame], now: Any = None) -> Dic
         "liquidity_ratio": None,
         "n_candles": 0,
         "has_volume": False,
+        "vix": None,
+        "pcr": None,
+        "iv_rank": None,
     }
     try:
         if now is not None:
@@ -232,6 +242,12 @@ def compute_feature_snapshot(df: Optional[pd.DataFrame], now: Any = None) -> Dic
             snapshot[key] = fn(df)
         except Exception as exc:  # defensive: one broken feature never
             errors.append(f"{key}: {type(exc).__name__}")  # kills the rest
+    for key, val in (("vix", vix), ("pcr", pcr), ("iv_rank", iv_rank)):
+        if val is not None:
+            try:
+                snapshot[key] = round(float(val), 6)
+            except (ValueError, TypeError):
+                snapshot[key] = None
     if errors:
         snapshot["snapshot_error"] = ",".join(errors)
     return snapshot

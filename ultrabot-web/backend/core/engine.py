@@ -2472,8 +2472,38 @@ class UltraBotEngine:
                 try:
                     from shadow.features import compute_feature_snapshot
 
+                    # Retrieve market / options context for v1.1 snapshot (Task 2)
+                    vix_val = getattr(self, "vix", None)
+                    if vix_val is None:
+                        vix_val = vix
+
+                    pcr_val = None
+                    ivr_val = None
+                    opt_rec = getattr(self, "option_recorder", None)
+                    if not opt_rec:
+                        try:
+                            import sys
+                            app_mod = sys.modules.get("app")
+                            if app_mod and hasattr(app_mod, "app") and hasattr(app_mod.app, "state"):
+                                opt_rec = getattr(app_mod.app.state, "option_recorder", None)
+                        except Exception:
+                            opt_rec = None
+
+                    if opt_rec and hasattr(opt_rec, "get_latest_metrics"):
+                        metrics_opt = opt_rec.get_latest_metrics(symbol)
+                        if isinstance(metrics_opt, dict):
+                            pcr_val = metrics_opt.get("pcr")
+                            ivr_val = metrics_opt.get("iv_rank")
+                    elif hasattr(self, "current_pcr") and self.current_pcr is not None:
+                        pcr_val = self.current_pcr
+                        ivr_val = getattr(self, "current_iv_rank", None)
+
                     features_snapshot = compute_feature_snapshot(
-                        df_candles, now=datetime.now(IST)
+                        df_candles,
+                        now=datetime.now(IST),
+                        vix=vix_val,
+                        pcr=pcr_val,
+                        iv_rank=ivr_val,
                     )
                 except Exception:
                     features_snapshot = None

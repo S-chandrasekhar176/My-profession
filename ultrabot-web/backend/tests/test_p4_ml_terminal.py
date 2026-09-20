@@ -86,6 +86,7 @@ def test_recent_evaluations_storage_and_filtering():
 def test_scorecard_metrics_calculation():
     """Verify scorecard metric calculations: unvalidated contract vs validated contract."""
     engine = MLInferenceEngine()
+    engine.last_validation_report = None
     # 1. Honest unvalidated contract on boot without report
     metrics = engine.get_scorecard_metrics()
 

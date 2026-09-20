@@ -195,12 +195,39 @@ class TestLiquidity:
 class TestSnapshotAssembly:
     def test_full_snapshot_shape(self):
         snap = compute_feature_snapshot(_df(_flat_rows(20)), now=datetime(2026, 9, 4, 9, 20))
-        assert snap["schema_version"] == FEATURES_SCHEMA_VERSION == "v1"
+        assert snap["schema_version"] == FEATURES_SCHEMA_VERSION == "1.1"
         assert snap["session_class"] == SESSION_OPENING_DRIVE
         assert snap["n_candles"] == 20
         assert snap["has_volume"] is True
         assert snap["atr"] == pytest.approx(2.0, abs=1e-6)
         assert snap["computed_at"] is not None
+        assert "vix" in snap
+        assert "pcr" in snap
+        assert "iv_rank" in snap
+
+    def test_schema_v1_1_new_keys(self):
+        # (a) snapshot returns 3 new keys, None when not passed, correct values when passed
+        snap_default = compute_feature_snapshot(_df(_flat_rows(20)), now=datetime(2026, 9, 4, 9, 20))
+        assert snap_default["schema_version"] == "1.1"
+        assert snap_default["vix"] is None
+        assert snap_default["pcr"] is None
+        assert snap_default["iv_rank"] is None
+
+        snap_passed = compute_feature_snapshot(
+            _df(_flat_rows(20)),
+            now=datetime(2026, 9, 4, 9, 20),
+            vix=14.5,
+            pcr=1.25,
+            iv_rank=45.0,
+        )
+        assert snap_passed["schema_version"] == "1.1"
+        assert snap_passed["vix"] == 14.5
+        assert snap_passed["pcr"] == 1.25
+        assert snap_passed["iv_rank"] == 45.0
+
+    def test_features_schema_version_is_1_1(self):
+        # (b) FEATURES_SCHEMA_VERSION == "1.1"
+        assert FEATURES_SCHEMA_VERSION == "1.1"
 
     def test_empty_inputs_all_none_never_zero(self):
         for bad in (None, pd.DataFrame(), "junk", [1, 2, 3]):
@@ -212,6 +239,9 @@ class TestSnapshotAssembly:
             assert snap["liquidity_ratio"] is None
             assert snap["session_class"] == SESSION_LUNCH  # time is still known
             assert snap["n_candles"] == 0
+            assert snap["vix"] is None
+            assert snap["pcr"] is None
+            assert snap["iv_rank"] is None
 
     def test_no_volume_is_flagged(self):
         rows = [(f"2026-09-04 09:15:{i:02d}", 9, 11, 9, 10.0, 0) for i in range(20)]
@@ -237,3 +267,93 @@ class TestSnapshotAssembly:
 
         snap = compute_feature_snapshot(_df(_flat_rows(20)), now=datetime(2026, 9, 4, 10, 0))
         assert json.loads(json.dumps(snap, sort_keys=True, default=str)) == snap
+
+    def test_build_dataset_per_schema_counters(self):
+        # (c) build_dataset per-schema counters on a mixed 1.0/1.1 fixture
+        import json
+        from ml.dataset import MLDatasetBuilder
+        builder = MLDatasetBuilder()
+
+        row_v1_0 = {
+            "features_json": json.dumps({
+                "schema_version": "1.0",
+                "atr_pct": 1.2,
+                "vwap_distance_pct": 0.5,
+                "trend_strength": 0.8,
+                "liquidity_ratio": 1.1,
+            }),
+            "outcome": "SHADOW_TARGET",
+            "pnl_per_share": 10.0,
+            "is_synthetic": False,
+        }
+        row_v1_1 = {
+            "features_json": json.dumps({
+                "schema_version": "1.1",
+                "atr_pct": 1.5,
+                "vwap_distance_pct": -0.2,
+                "trend_strength": 1.0,
+                "liquidity_ratio": 1.3,
+                "vix": 16.0,
+                "pcr": 1.1,
+                "iv_rank": 40.0,
+            }),
+            "outcome": "SHADOW_SL",
+            "pnl_per_share": -5.0,
+            "is_synthetic": False,
+        }
+        row_unknown = {
+            "features_json": json.dumps({
+                "atr_pct": 1.1,
+                "vwap_distance_pct": 0.1,
+                "trend_strength": 0.2,
+                "liquidity_ratio": 1.0,
+            }),
+            "outcome": "SHADOW_TARGET",
+            "pnl_per_share": 8.0,
+            "is_synthetic": False,
+        }
+        row_excluded = {
+            "outcome": "SHADOW_TARGET",
+            "is_synthetic": False,
+        }
+
+        outcomes = [row_v1_0, row_v1_1, row_unknown, row_excluded]
+        X, y = builder.build_dataset(outcomes, fit_scaler=False)
+
+        assert len(X) == 3
+        assert len(y) == 3
+        assert builder.last_schema_counts == {"1.0": 1, "1.1": 1, "unknown": 1}
+
+    @pytest.mark.asyncio
+    async def test_engine_call_site_degrades_safely(self):
+        # (d) engine call site degrades safely when pcr/iv_rank sources are absent
+        from core.engine import UltraBotEngine
+        from unittest.mock import MagicMock, AsyncMock
+
+        engine = UltraBotEngine.__new__(UltraBotEngine)
+        engine.vix = 15.5
+        engine.current_regime = "bull"
+        engine._shadow_feature_snapshot_enabled = True
+        engine.strategy_registry = MagicMock()
+        mock_strat = MagicMock()
+        mock_strat.scan = AsyncMock(return_value={"direction": "BUY", "entry_price": 100.0, "stop_loss": 98.0, "target": 104.0})
+        engine.strategy_registry.get = MagicMock(return_value=mock_strat)
+
+        candles = [
+            {"timestamp": f"2026-09-04 09:15:{i:02d}", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000}
+            for i in range(20)
+        ]
+        res = await engine._execute_strategy_scan(
+            symbol="RELIANCE",
+            candles=candles,
+            strategy_name="ORB",
+            regime="bull",
+            vix=15.5,
+        )
+        assert res is not None
+        assert "features_snapshot" in res
+        snap = res["features_snapshot"]
+        assert snap["schema_version"] == "1.1"
+        assert snap["vix"] == 15.5
+        assert snap["pcr"] is None
+        assert snap["iv_rank"] is None

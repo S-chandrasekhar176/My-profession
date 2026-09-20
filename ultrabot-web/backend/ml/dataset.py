@@ -208,6 +208,9 @@ class MLDatasetBuilder:
         included_count = 0
         excluded_count = 0
         excluded_synthetic = 0
+        schema_1_0 = 0
+        schema_1_1 = 0
+        schema_unknown = 0
 
         for out in sorted_outcomes:
             # Defensive synthetic filter (NF10-C)
@@ -230,7 +233,48 @@ class MLDatasetBuilder:
             y_rows.append(label)
             included_count += 1
 
-        msg = f"[ML Dataset] Built dataset: included: {included_count}, excluded: {excluded_count}"
+            # Read schema_version from features_json (Task 3)
+            schema_ver = None
+            if isinstance(out, dict):
+                fj = out.get("features_json")
+                if isinstance(fj, str) and fj:
+                    try:
+                        schema_ver = json.loads(fj).get("schema_version")
+                    except Exception:
+                        schema_ver = None
+                elif isinstance(fj, dict):
+                    schema_ver = fj.get("schema_version")
+                if not schema_ver:
+                    schema_ver = out.get("schema_version")
+            else:
+                fj = getattr(out, "features_json", None)
+                if isinstance(fj, str) and fj:
+                    try:
+                        schema_ver = json.loads(fj).get("schema_version")
+                    except Exception:
+                        schema_ver = None
+                elif isinstance(fj, dict):
+                    schema_ver = fj.get("schema_version")
+                if not schema_ver:
+                    schema_ver = getattr(out, "schema_version", None)
+
+            if schema_ver in ("1.0", "v1"):
+                schema_1_0 += 1
+            elif schema_ver == "1.1":
+                schema_1_1 += 1
+            else:
+                schema_unknown += 1
+
+        self.last_schema_counts = {
+            "1.0": schema_1_0,
+            "1.1": schema_1_1,
+            "unknown": schema_unknown,
+        }
+
+        msg = (
+            f"[ML Dataset] Built dataset: included: {included_count}, excluded: {excluded_count}, "
+            f"schema_1.0: {schema_1_0}, schema_1.1: {schema_1_1}, schema_unknown: {schema_unknown}"
+        )
         if excluded_synthetic > 0:
             msg += f", excluded_synthetic: {excluded_synthetic}"
         logger.info(msg)

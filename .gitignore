@@ -33,6 +33,8 @@ __pycache__/
 *.pyd
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite3
 .encryption_key
 **/.encryption_key
