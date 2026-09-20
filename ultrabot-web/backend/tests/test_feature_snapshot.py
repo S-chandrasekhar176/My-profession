@@ -357,3 +357,48 @@ class TestSnapshotAssembly:
         assert snap["vix"] == 15.5
         assert snap["pcr"] is None
         assert snap["iv_rank"] is None
+
+    @pytest.mark.asyncio
+    async def test_engine_call_site_rejects_stale_option_recorder(self):
+        # (NF12-A) engine call site rejects stale option metrics and records None for pcr/iv_rank
+        from core.engine import UltraBotEngine
+        from unittest.mock import MagicMock, AsyncMock
+
+        engine = UltraBotEngine.__new__(UltraBotEngine)
+        engine.vix = 14.2
+        engine.current_regime = "sideways"
+        engine._shadow_feature_snapshot_enabled = True
+        engine.strategy_registry = MagicMock()
+        mock_strat = MagicMock()
+        mock_strat.scan = AsyncMock(return_value={"direction": "BUY", "entry_price": 100.0, "stop_loss": 98.0, "target": 104.0})
+        engine.strategy_registry.get = MagicMock(return_value=mock_strat)
+
+        # Mock option_recorder returning stale metrics (e.g. feed outage fallback)
+        mock_opt_rec = MagicMock()
+        mock_opt_rec.get_latest_metrics = MagicMock(return_value={
+            "pcr": 1.0,
+            "iv": 0.15,
+            "iv_rank": 50.0,
+            "stale": True,
+        })
+        engine.option_recorder = mock_opt_rec
+
+        candles = [
+            {"timestamp": f"2026-09-04 09:15:{i:02d}", "open": 100.0, "high": 102.0, "low": 99.0, "close": 101.0, "volume": 1000}
+            for i in range(20)
+        ]
+        res = await engine._execute_strategy_scan(
+            symbol="TCS",
+            candles=candles,
+            strategy_name="ORB",
+            regime="sideways",
+            vix=14.2,
+        )
+        assert res is not None
+        assert "features_snapshot" in res
+        snap = res["features_snapshot"]
+        assert snap["schema_version"] == "1.1"
+        assert snap["vix"] == 14.2
+        # Must be None, never fabricated 1.0 / 50.0
+        assert snap["pcr"] is None
+        assert snap["iv_rank"] is None

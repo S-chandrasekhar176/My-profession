@@ -2491,7 +2491,7 @@ class UltraBotEngine:
 
                     if opt_rec and hasattr(opt_rec, "get_latest_metrics"):
                         metrics_opt = opt_rec.get_latest_metrics(symbol)
-                        if isinstance(metrics_opt, dict):
+                        if isinstance(metrics_opt, dict) and not metrics_opt.get("stale", True):
                             pcr_val = metrics_opt.get("pcr")
                             ivr_val = metrics_opt.get("iv_rank")
                     elif hasattr(self, "current_pcr") and self.current_pcr is not None:
