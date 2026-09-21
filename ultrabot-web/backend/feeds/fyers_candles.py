@@ -42,7 +42,7 @@ _CACHE_TTL_SECONDS = 60.0
 _EMPTY_RESULTS_BEFORE_REBUILD = 2
 # Candle history window (calendar days). A 100-bar 5m request needs ~500
 # 1m bars ≈ 1.5 trading days; 5 calendar days covers holidays comfortably.
-_HISTORY_WINDOW_DAYS = 2
+_HISTORY_WINDOW_DAYS = 5
 
 # Engine/plain symbols → Fyers instruments.
 _INDEX_MAP = {
