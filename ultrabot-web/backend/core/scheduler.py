@@ -534,6 +534,7 @@ class MarketLifecycleScheduler:
 
         repo = await self._get_repo()
         try:
+            todays_trades = await repo.get_todays_closed_trades() if repo else []
             wins = sum(1 for t in todays_trades if float(t.pnl or 0.0) > 0)
             losses = sum(1 for t in todays_trades if float(t.pnl or 0.0) < 0)
             net_wins = sum(1 for t in todays_trades if float(t.net_pnl or 0.0) > 0)
