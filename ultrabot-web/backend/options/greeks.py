@@ -277,6 +277,23 @@ class GreeksCalculator:
         provenance: Optional[dict] = None,
     ) -> dict:
         """Verify broker-provided Greeks against analytical Black-Scholes benchmark."""
+        prov_note = "broker feed does not stream greeks; analytical BS values used"
+        has_any_nonzero_broker = any(
+            abs(float(broker_greeks.get(greek, 0.0) or 0.0)) > 1e-6
+            for greek in ("delta", "gamma", "theta", "vega")
+        ) if broker_greeks else False
+
+        if not has_any_nonzero_broker:
+            res_prov = dict(provenance) if provenance else {}
+            res_prov["note"] = prov_note
+            return {
+                "valid": True,
+                "status": "synthetic_computed",
+                "divergence": {},
+                "message": prov_note,
+                "provenance": res_prov,
+            }
+
         divergences = {}
         valid = True
         for greek in ("delta", "gamma", "theta", "vega"):
@@ -294,8 +311,10 @@ class GreeksCalculator:
             if rel_err > tolerance and diff > 0.05:
                 valid = False
 
+        status = "verified" if valid else "divergence"
         res = {
             "valid": valid,
+            "status": status,
             "divergence": divergences,
             "message": "Greeks verified within tolerance" if valid else f"Divergence detected in {list(divergences.keys())}",
         }

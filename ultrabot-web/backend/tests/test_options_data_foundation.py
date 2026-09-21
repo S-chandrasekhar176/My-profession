@@ -554,4 +554,31 @@ def test_recorder_iv_rank_empirical_bounds():
     assert recorder._iv_bounds["BANKNIFTY"][0] == 0.08
 
 
+def test_verify_greeks_synthetic_computed_when_broker_greeks_zero():
+    """Backlog #3: when broker feed does not stream greeks (returns 0.0),
+    verify_greeks must return status='synthetic_computed', valid=True with provenance note,
+    and must not label it divergence. Non-zero divergence must still return valid=False."""
+    calc = GreeksCalculator()
+    theo_greeks = {"delta": 0.52, "gamma": 0.0012, "theta": -12.5, "vega": 18.2}
+
+    # Case 1: Broker greeks are all 0.0 -> synthetic_computed, valid=True
+    zero_broker_greeks = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+    res_zero = calc.verify_greeks(zero_broker_greeks, theo_greeks)
+    assert res_zero["valid"] is True
+    assert res_zero["status"] == "synthetic_computed"
+    assert "broker feed does not stream greeks" in res_zero["provenance"]["note"]
+
+    # Case 2: Broker greeks are empty/absent -> synthetic_computed, valid=True
+    res_empty = calc.verify_greeks({}, theo_greeks)
+    assert res_empty["valid"] is True
+    assert res_empty["status"] == "synthetic_computed"
+
+    # Case 3: Broker delta off by >20% -> still divergence, valid=False
+    divergent_broker_greeks = {"delta": 0.85, "gamma": 0.0012, "theta": -12.5, "vega": 18.2}
+    res_div = calc.verify_greeks(divergent_broker_greeks, theo_greeks, tolerance=0.20)
+    assert res_div["valid"] is False
+    assert res_div["status"] == "divergence"
+
+
+
 
