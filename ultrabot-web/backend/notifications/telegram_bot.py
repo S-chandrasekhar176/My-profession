@@ -748,3 +748,21 @@ class TelegramBot:
         except Exception as exc:
             logger.error("Failed to send Telegram document: %s", exc)
             return False
+
+    # ------------------------------------------------------------------
+    # Webhook cleanup (v0.4.22 / Backlog #1: clear conflicting long polls)
+    # ------------------------------------------------------------------
+
+    async def delete_webhook(self, drop_pending_updates: bool = True) -> bool:
+        """Call deleteWebhook (optionally dropping pending updates) to clear hanging polls."""
+        if not self.bot_token:
+            return False
+        url = f"https://api.telegram.org/bot{self.bot_token}/deleteWebhook"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json={"drop_pending_updates": drop_pending_updates})
+                body = resp.json()
+                return bool(body.get("ok", False))
+        except Exception as exc:
+            logger.warning("Failed to delete webhook: %s", exc)
+            return False

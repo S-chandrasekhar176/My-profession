@@ -36,6 +36,7 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.sqlite3
+*.lock
 .encryption_key
 **/.encryption_key
 

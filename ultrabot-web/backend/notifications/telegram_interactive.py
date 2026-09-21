@@ -34,6 +34,16 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -146,6 +156,112 @@ def compute_pnl_view(
     }
 
 
+class TelegramPollLock:
+    """Process-level advisory lockfile guard for Telegram interactive polling.
+
+    Prevents multiple processes (e.g. uvicorn reload workers or duplicate engines)
+    from concurrently polling Telegram getUpdates, which causes HTTP 409 Conflict.
+    """
+
+    def __init__(self, lockfile_path: str = "data/telegram_poll.lock"):
+        self.lockfile_path = lockfile_path
+        self._fh = None
+        self._locked = False
+
+    def acquire(self) -> Tuple[bool, Optional[int]]:
+        """Attempt to acquire exclusive lock non-blockingly.
+
+        Returns (True, my_pid) if acquired, (False, holder_pid) if locked by another process.
+        """
+        try:
+            lock_dir = os.path.dirname(os.path.abspath(self.lockfile_path))
+            if lock_dir:
+                os.makedirs(lock_dir, exist_ok=True)
+            if not os.path.exists(self.lockfile_path):
+                try:
+                    with open(self.lockfile_path, "a") as f:
+                        pass
+                except Exception:
+                    pass
+
+            fh = open(self.lockfile_path, "r+b")
+            self._fh = fh
+
+            if msvcrt is not None:
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    holder_pid = self._read_holder_pid(fh)
+                    fh.close()
+                    self._fh = None
+                    return False, holder_pid
+            elif fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    holder_pid = self._read_holder_pid(fh)
+                    fh.close()
+                    self._fh = None
+                    return False, holder_pid
+
+            # Successfully locked - write byte 0 dummy marker and byte 1+ PID
+            fh.seek(0)
+            pid_bytes = b"X" + str(os.getpid()).encode("utf-8")
+            fh.write(pid_bytes)
+            fh.truncate()
+            fh.flush()
+            self._locked = True
+            return True, os.getpid()
+        except Exception as exc:
+            logger.warning("Failed to acquire telegram poll lock: %s", exc)
+            if self._fh:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+            return False, None
+
+    def _read_holder_pid(self, fh) -> Optional[int]:
+        try:
+            fh.seek(1)
+            raw = fh.read().decode("utf-8", errors="ignore").strip()
+            return int(raw) if raw.isdigit() else None
+        except Exception:
+            return None
+
+    def release(self) -> None:
+        """Release the advisory lock and close the file handle."""
+        if not self._locked or not self._fh:
+            if self._fh:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+            self._locked = False
+            return
+        try:
+            if msvcrt is not None:
+                try:
+                    self._fh.seek(0)
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            elif fcntl is not None:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            self._fh.close()
+        except Exception as exc:
+            logger.debug("Error releasing telegram poll lock: %s", exc)
+        finally:
+            self._fh = None
+            self._locked = False
+
+
 class InteractiveTelegramBot:
     """Two-way Telegram bridge between the user's mobile and the engine."""
 
@@ -166,6 +282,10 @@ class InteractiveTelegramBot:
         self._token = str(cfg.get("telegram_bot_token", "") or "").strip()
         self._chat_id = str(cfg.get("telegram_chat_id", "") or "").strip()
         self._poll_timeout = int(cfg.get("telegram_poll_timeout", 25))
+        self._poll_lock = TelegramPollLock(
+            lockfile_path=str(cfg.get("telegram_poll_lockfile", "data/telegram_poll.lock"))
+        )
+        self._poller_disabled = False
 
         self._offset = 0
         self._sent_cards: Dict[str, int] = {}      # opp_id -> telegram message_id
@@ -203,7 +323,7 @@ class InteractiveTelegramBot:
         the 11:16-IST 'bot stopped responding' failure mode.
         """
         try:
-            if self._stopping:
+            if self._stopping or getattr(self, "_poller_disabled", False):
                 return
             reason = "returned unexpectedly"
             if task.cancelled():
@@ -934,70 +1054,93 @@ class InteractiveTelegramBot:
 
     async def poll_loop(self) -> None:
         """Long-poll getUpdates and dispatch messages/callbacks. Never raises."""
-        consecutive_errors = 0
-        while not self._stopping:
-            # v0.4.21 heartbeat: refreshed at the TOP of every cycle (after
-            # each long-poll return), surfaced via poll_stalled_seconds().
-            self._poll_beat = time.monotonic()
+        acquired, holder_pid = self._poll_lock.acquire()
+        if not acquired:
+            self._poller_disabled = True
+            pid_str = str(holder_pid) if holder_pid else "unknown"
+            logger.warning(
+                "Another Telegram interactive poller is running (PID %s). Disabling this poller instance.",
+                pid_str,
+            )
+            return
+
+        try:
+            # On startup (before first getUpdates), clear hanging poll sessions and conflicting webhooks
             try:
-                data = await self._tg(
-                    "getUpdates",
-                    offset=self._offset,
-                    timeout=self._poll_timeout,
-                    allowed_updates=["message", "callback_query"],
-                )
-                if data is None:
-                    consecutive_errors += 1
-                    if consecutive_errors % 20 == 0:
-                        logger.critical(
-                            "poll_loop: %d consecutive failed getUpdates calls — "
-                            "bot effectively deaf (token/network?)",
-                            consecutive_errors,
-                        )
-                    await asyncio.sleep(min(5 * consecutive_errors, 30))
-                    continue
-                consecutive_errors = 0
-                if not data.get("ok"):
-                    await asyncio.sleep(3)
-                    continue
-                for update in data.get("result", []):
-                    self._offset = max(self._offset, update.get("update_id", 0) + 1)
-                    if "callback_query" in update:
-                        # v0.4.21: bounded dispatch — a hung handler (DB/HTTP
-                        # wedge) used to freeze ALL subsequent messages forever
-                        # (the 11:16-IST silence). Timeout cancels the handler;
-                        # Repository.close() is shielded so its session still
-                        # returns to the pool cleanly.
-                        try:
-                            await asyncio.wait_for(
-                                self._handle_callback(update["callback_query"]),
-                                timeout=_HANDLER_TIMEOUT_S,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                "callback handler timed out after %ss — update skipped",
-                                _HANDLER_TIMEOUT_S,
-                            )
-                    elif "message" in update:
-                        msg = update["message"]
-                        if self._authorized((msg.get("chat") or {}).get("id")):
-                            text = msg.get("text", "")
-                            if text.startswith("/"):
-                                try:
-                                    await asyncio.wait_for(
-                                        self._handle_command(text),
-                                        timeout=_HANDLER_TIMEOUT_S,
-                                    )
-                                except asyncio.TimeoutError:
-                                    logger.error(
-                                        "command '%s' timed out after %ss",
-                                        text.split()[0], _HANDLER_TIMEOUT_S,
-                                    )
-            except asyncio.CancelledError:
-                return
+                await self._tg("deleteWebhook", drop_pending_updates=True)
             except Exception as exc:
-                logger.error("poll_loop cycle failed: %s", exc, exc_info=True)
-                await asyncio.sleep(10)
+                logger.warning("Telegram deleteWebhook on startup failed: %s", exc)
+
+            consecutive_errors = 0
+            while not self._stopping:
+                # v0.4.21 heartbeat: refreshed at the TOP of every cycle (after
+                # each long-poll return), surfaced via poll_stalled_seconds().
+                self._poll_beat = time.monotonic()
+                try:
+                    data = await self._tg(
+                        "getUpdates",
+                        offset=self._offset,
+                        timeout=self._poll_timeout,
+                        allowed_updates=["message", "callback_query"],
+                    )
+                    if data is None:
+                        consecutive_errors += 1
+                        if consecutive_errors % 20 == 0:
+                            logger.critical(
+                                "poll_loop: %d consecutive failed getUpdates calls — "
+                                "bot effectively deaf (token/network?)",
+                                consecutive_errors,
+                            )
+                        await asyncio.sleep(min(5 * consecutive_errors, 30))
+                        continue
+                    consecutive_errors = 0
+                    if not data.get("ok"):
+                        if data.get("error_code") == 409 or "conflict" in str(data.get("description", "")).lower():
+                            logger.warning("Telegram poll conflict detected (another instance active?), backing off 5s")
+                            await asyncio.sleep(5)
+                        else:
+                            await asyncio.sleep(3)
+                        continue
+                    for update in data.get("result", []):
+                        self._offset = max(self._offset, update.get("update_id", 0) + 1)
+                        if "callback_query" in update:
+                            # v0.4.21: bounded dispatch — a hung handler (DB/HTTP
+                            # wedge) used to freeze ALL subsequent messages forever
+                            # (the 11:16-IST silence). Timeout cancels the handler;
+                            # Repository.close() is shielded so its session still
+                            # returns to the pool cleanly.
+                            try:
+                                await asyncio.wait_for(
+                                    self._handle_callback(update["callback_query"]),
+                                    timeout=_HANDLER_TIMEOUT_S,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.error(
+                                    "callback handler timed out after %ss — update skipped",
+                                    _HANDLER_TIMEOUT_S,
+                                )
+                        elif "message" in update:
+                            msg = update["message"]
+                            if self._authorized((msg.get("chat") or {}).get("id")):
+                                text = msg.get("text", "")
+                                if text.startswith("/"):
+                                    try:
+                                        await asyncio.wait_for(
+                                            self._handle_command(text),
+                                            timeout=_HANDLER_TIMEOUT_S,
+                                        )
+                                    except asyncio.TimeoutError:
+                                        logger.error(
+                                            "command '%s' timed out after %ss",
+                                            text.split()[0], _HANDLER_TIMEOUT_S,
+                                        )
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.error("poll_loop cycle failed: %s", exc, exc_info=True)
+                    await asyncio.sleep(10)
+        finally:
+            self._poll_lock.release()
 
     async def canary_loop(self) -> None:
         """Blind-spot canary: engine down during market hours → Telegram alert."""
@@ -1083,6 +1226,7 @@ class InteractiveTelegramBot:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks.clear()
+        self._poll_lock.release()
 
     # ------------------------------------------------------------------
     # Evidence export (for v0.4.10 acceptance pack)

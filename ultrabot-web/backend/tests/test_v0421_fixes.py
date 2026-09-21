@@ -428,6 +428,8 @@ def test_poll_loop_hung_handler_does_not_block_next_message(monkeypatch):
         ]
 
         async def fake_tg(method, **kwargs):
+            if method == "deleteWebhook":
+                return {"ok": True}
             return seq.pop(0) if seq else None
 
         bot._tg = fake_tg
