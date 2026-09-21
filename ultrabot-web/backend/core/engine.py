@@ -1600,6 +1600,8 @@ class UltraBotEngine:
                         context={"action": "scan_symbol", "symbol": symbol},
                         session_id=self.session_id,
                     )
+                finally:
+                    await asyncio.sleep(0.15)
 
             # Broadcast telemetry update to WebSocket subscribers
             try:

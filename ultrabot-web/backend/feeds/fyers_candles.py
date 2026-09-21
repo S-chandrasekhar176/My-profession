@@ -147,6 +147,7 @@ class FyersCandleFeed(BaseFeed):
         self._cache_ttl = float(cache_ttl_seconds)
         self._consecutive_empty = 0
         self._connected = True  # optimistic; failures flip it until a rebuild
+        self._last_request_ts: float = 0.0
 
     # ── Hot-swap (daily re-login) ─────────────────────────────
 
@@ -197,6 +198,12 @@ class FyersCandleFeed(BaseFeed):
             fyers_sym = to_fyers_symbol(symbol)
             range_to = datetime.now(IST).date().isoformat()
             range_from = (datetime.now(IST) - timedelta(days=_HISTORY_WINDOW_DAYS)).date().isoformat()
+
+            # Pacing floor (~150ms) to ensure burst historical calls cannot exhaust rate limits
+            elapsed = time.monotonic() - self._last_request_ts
+            if elapsed < 0.15:
+                await asyncio.sleep(0.15 - elapsed)
+            self._last_request_ts = time.monotonic()
 
             # FyersBroker.get_candles(symbol, exchange, resolution, from, to)
             raw = await self._broker.get_candles(
