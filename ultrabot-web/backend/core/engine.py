@@ -5700,16 +5700,26 @@ class UltraBotEngine:
 
         # Get daily P&L
         pnl_data = {"net_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0}
+        open_positions = []
         try:
             async with self._repo_context() as repo:
                 pnl_data = await repo.get_todays_pnl()
+                if repo is not None and hasattr(repo, "get_open_positions"):
+                    open_positions = await repo.get_open_positions() or []
         except Exception:
             pass
 
         # Get risk status
         risk_summary = {}
         try:
-            risk_status = await self.daily_risk.get_daily_risk_status()
+            capital_in_use = sum(
+                float(getattr(p, "invested_amount", None) or (float(getattr(p, "entry_price", 0.0) or 0.0) * float(getattr(p, "remaining_qty", getattr(p, "quantity", 0)) or 0)))
+                for p in open_positions
+            )
+            risk_status = await self.daily_risk.get_daily_risk_status(
+                open_positions_count=len(open_positions),
+                capital_in_use=capital_in_use,
+            )
             if hasattr(risk_status, "model_dump"):
                 risk_summary = risk_status.model_dump()
             elif isinstance(risk_status, dict):
@@ -5912,7 +5922,14 @@ class UltraBotEngine:
         # Risk state
         risk_state = {}
         try:
-            risk_status = await self.daily_risk.get_daily_risk_status()
+            capital_in_use = sum(
+                float(getattr(p, "invested_amount", None) or (float(getattr(p, "entry_price", 0.0) or 0.0) * float(getattr(p, "remaining_qty", getattr(p, "quantity", 0)) or 0)))
+                for p in open_positions
+            )
+            risk_status = await self.daily_risk.get_daily_risk_status(
+                open_positions_count=len(open_positions),
+                capital_in_use=capital_in_use,
+            )
             if hasattr(risk_status, "model_dump"):
                 risk_state = risk_status.model_dump()
             elif isinstance(risk_status, dict):
