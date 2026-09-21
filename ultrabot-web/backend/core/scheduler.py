@@ -511,11 +511,23 @@ class MarketLifecycleScheduler:
         except Exception as exc:
             logger.error("Auto squareoff routine error: %s", exc, exc_info=True)
 
-    async def _write_daily_summary(self, today_str: str) -> Dict[str, Any]:
+    async def _write_daily_summary(self, today_str: Any = None, *args, **kwargs) -> Dict[str, Any]:
         """v0.4.18: shared DailySummary writer (used by the 15:30 cron AND by
         the boot-time EOD catch-up). Computes the day's ledger stats, persists
         one daily_summary row and returns the stats for broadcast/alerts.
         Never raises (callers wrap it)."""
+        repo_created_here = False
+        if today_str is not None and not isinstance(today_str, str):
+            repo = today_str
+            today_str = args[0] if (args and isinstance(args[0], str)) else kwargs.get("today_str", datetime.now(IST).strftime("%Y-%m-%d"))
+        else:
+            if not today_str or not isinstance(today_str, str):
+                today_str = kwargs.get("today_str", datetime.now(IST).strftime("%Y-%m-%d"))
+            repo = kwargs.get("repo")
+            if repo is None and hasattr(self, "_get_repo") and callable(self._get_repo):
+                repo = await self._get_repo()
+                repo_created_here = True
+
         total_trades = 0
         total_net_pnl = 0.0
         stats: Dict[str, Any] = {
@@ -531,8 +543,6 @@ class MarketLifecycleScheduler:
             "worst_trade": 0.0,
             "trades": [],
         }
-
-        repo = await self._get_repo()
         try:
             todays_trades = await repo.get_todays_closed_trades() if repo else []
             wins = sum(1 for t in todays_trades if float(t.pnl or 0.0) > 0)
@@ -589,7 +599,7 @@ class MarketLifecycleScheduler:
                 "trades": todays_trades,
             })
         finally:
-            if repo is not None and hasattr(repo, "close"):
+            if repo_created_here and repo is not None and hasattr(repo, "close"):
                 try:
                     res = repo.close()
                     if asyncio.iscoroutine(res):
