@@ -328,6 +328,7 @@ async def lifespan(app: FastAPI):
             notif_config=notif_config,
         )
         interactive_tg.start()
+        app.state.telegram_interactive = interactive_tg
     # -- Phase 2: F&O Option Chain Recorder ----------------------------
     try:
         from options.option_recorder import OptionChainRecorder

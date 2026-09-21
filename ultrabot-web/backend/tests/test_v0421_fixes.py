@@ -442,3 +442,29 @@ def test_poll_loop_hung_handler_does_not_block_next_message(monkeypatch):
         assert "/slow" not in handled        # hung handler cancelled, not completed
 
     asyncio.run(_inner())
+
+
+def test_app_state_telegram_interactive_health_exposure():
+    """Verify that when telegram_interactive is set on app.state, health evaluation
+    correctly resolves telegram_poll_alive=True."""
+    import time as _time
+    from types import SimpleNamespace
+
+    bot = _mk_bot()
+    bot._tasks = [MagicMock()]
+    bot._stopping = False
+    bot._poll_beat = _time.monotonic() - 1.0  # fresh heartbeat
+    bot._poll_timeout = 20.0
+
+    state = SimpleNamespace(telegram_interactive=bot)
+    itg = getattr(state, "telegram_interactive", None)
+    assert itg is not None and not getattr(itg, "_stopping", True)
+
+    stalled = itg.poll_stalled_seconds()
+    timeout = float(getattr(itg, "_poll_timeout", 0) or 0)
+    tg_poll_alive = (
+        stalled is not None
+        and stalled <= max(120.0, timeout + 60.0)
+    )
+    assert tg_poll_alive is True
+
