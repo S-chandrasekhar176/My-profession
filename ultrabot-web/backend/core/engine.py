@@ -647,6 +647,35 @@ class UltraBotEngine:
                     else:
                         self.initial_capital = resolve_total_capital(config=self.config)
 
+                # Paper mode capital reconciliation: anchor boot capital to trades ledger truth
+                if will_run_paper:
+                    try:
+                        async with self._repo_context() as repo:
+                            if repo is not None:
+                                trades_count = 0
+                                if hasattr(repo, "get_trade_count"):
+                                    trades_count = await repo.get_trade_count()
+                                elif hasattr(repo, "_count"):
+                                    from db.migrations import Trade
+                                    trades_count = await repo._count(Trade)
+
+                                if trades_count > 0 and hasattr(repo, "get_all_time_realized_net"):
+                                    expected = resolve_total_capital(config=self.config) + await repo.get_all_time_realized_net()
+                                    if abs(self.initial_capital - expected) > 1.00:
+                                        logger.warning(
+                                            "Boot capital reconciliation: resolved ₹%.2f but trades ledger implies "
+                                            "₹%.2f (drift ₹%.2f). Using ledger truth.",
+                                            self.initial_capital,
+                                            expected,
+                                            self.initial_capital - expected,
+                                        )
+                                        self.initial_capital = expected
+                    except Exception as rec_exc:
+                        logger.warning(
+                            "Could not reconcile boot capital with trades ledger: %s",
+                            rec_exc,
+                        )
+
                 # Sync paper broker's internal capital whenever the factory
                 # resolved to PaperBroker (mode=paper OR paper-mapped name).
                 if will_run_paper and self.broker:

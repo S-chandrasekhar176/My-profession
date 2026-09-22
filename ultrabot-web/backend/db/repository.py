@@ -275,6 +275,16 @@ class Repository:
     async def delete_trade(self, trade_id: str) -> bool:
         return await self._delete_by_id(Trade, trade_id)
 
+    async def get_trade_count(self) -> int:
+        return await self._count(Trade)
+
+    async def get_all_time_realized_net(self) -> float:
+        """SELECT COALESCE(SUM(net_pnl), 0) FROM trades."""
+        stmt = select(func.coalesce(func.sum(Trade.net_pnl), 0.0))
+        result = await self.session.execute(stmt)
+        val = result.scalar()
+        return float(val or 0.0)
+
     async def get_todays_pnl(self) -> Dict[str, Any]:
         """Get today's aggregate P&L."""
         today = _today_str()
