@@ -83,6 +83,42 @@ class FakeRepoWithTradesAndSummaries:
     async def get_all_time_realized_net(self) -> float:
         return float(sum(t.net_pnl for t in self.trades))
 
+    async def get_latest_session_by_date(self, date_str):
+        matches = [s for s in self.sessions if s.date == date_str]
+        return matches[-1] if matches else None
+
+    async def get_session(self, session_id):
+        for s in self.sessions:
+            if s.id == session_id:
+                return s
+        return None
+
+
+def _seed_same_day_session(repo, initial_capital: float, mode: str = "paper", broker: str = "paper"):
+    """Seed a non-completed session for TODAY so start() takes the resume path."""
+    today = datetime.now(IST).date().isoformat()
+    engine_state = {
+        "mode": mode,
+        "broker": broker,
+        "initial_capital": initial_capital,
+        "current_regime": "Sideways",
+        "vix": 15.0,
+        "nifty_price": 0.0,
+        "open_positions": [],
+        "watchlist": [],
+        "daily_risk": {},
+        "active_strategies": [],
+        "pending_opportunities": [],
+    }
+    session_obj = MagicMock()
+    session_obj.id = f"sess-{len(repo.sessions) + 1}"
+    session_obj.date = today
+    session_obj.status = "running"
+    session_obj.engine_state = engine_state
+    session_obj.metadata_json = {"broker": broker, "mode": mode, "initial_capital": initial_capital}
+    repo.sessions.append(session_obj)
+    return session_obj
+
 
 def create_engine(
     repo,
@@ -228,3 +264,32 @@ async def test_repository_all_time_realized_net_sql_aggregation():
         assert actual_sum == pytest.approx(expected_sum, abs=0.01)
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_same_day_resume_reconciles_boot_capital_with_ledger(caplog):
+    """REGRESSION (same-day resume path): a mid-day restart restores
+    initial_capital=500,688.01 from the session engine_state, but the trades
+    ledger implies ₹497,228.93 (base 500,000 + SUM(net) −2,771.07). The
+    reconciliation must ALSO run on the same-day resume path, override the
+    restored capital, and log the drift warning.
+
+    FAILS on the pre-fix tip (reconciliation only ran on the new-day path);
+    PASSES once _reconcile_boot_capital_with_ledger() is called on resume.
+    """
+    repo = FakeRepoWithTradesAndSummaries()
+    # No daily summaries: engine resumes the seeded session's initial_capital
+    # (500,688.01) directly from engine_state via recover_state().
+    _seed_same_day_session(repo, initial_capital=500688.01)
+    repo.trades.append(FakeTrade(net_pnl=-2771.07))
+
+    engine = create_engine(repo, carry_forward=True, virtual_capital=500000.0)
+    with caplog.at_level(logging.WARNING):
+        res = await engine.start(mode="paper", broker_name="paper", initial_capital=None)
+
+    assert res["status"] == "started"
+    assert engine.initial_capital == pytest.approx(497228.93, abs=0.01)
+    assert (
+        "Boot capital reconciliation: resolved ₹500688.01 but trades ledger implies ₹497228.93"
+        in caplog.text
+    )

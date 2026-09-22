@@ -504,6 +504,17 @@ class UltraBotEngine:
                         # recovered session capital (broker was created before
                         # recovery could adjust self.initial_capital).
                         self._sync_paper_broker_capital()
+                        # Self-healing carry-forward must ALSO run on the
+                        # same-day resume path: the restored session capital
+                        # may have drifted from the trades-ledger truth
+                        # (re-anchored / corrected ledger rows mid-day).
+                        if self.mode == "paper":
+                            await self._reconcile_boot_capital_with_ledger()
+                            # Re-align the broker ledger with the reconciled
+                            # capital (the sync above ran pre-reconciliation;
+                            # without this the PaperBroker cash would keep the
+                            # drifted value — the classic two-ledger drift).
+                            self._sync_paper_broker_capital()
                     logger.info(
                         "Resumed same-day session %s: regime=%s, vix=%.1f, starting_capital=%.2f",
                         self.session_id, self.current_regime, self.vix, self.initial_capital,
@@ -647,34 +658,12 @@ class UltraBotEngine:
                     else:
                         self.initial_capital = resolve_total_capital(config=self.config)
 
-                # Paper mode capital reconciliation: anchor boot capital to trades ledger truth
+                # Paper mode capital reconciliation: anchor boot capital to
+                # trades ledger truth (logic extracted to
+                # _reconcile_boot_capital_with_ledger so the same-day resume
+                # path runs the identical check).
                 if will_run_paper:
-                    try:
-                        async with self._repo_context() as repo:
-                            if repo is not None:
-                                trades_count = 0
-                                if hasattr(repo, "get_trade_count"):
-                                    trades_count = await repo.get_trade_count()
-                                elif hasattr(repo, "_count"):
-                                    from db.migrations import Trade
-                                    trades_count = await repo._count(Trade)
-
-                                if trades_count > 0 and hasattr(repo, "get_all_time_realized_net"):
-                                    expected = resolve_total_capital(config=self.config) + await repo.get_all_time_realized_net()
-                                    if abs(self.initial_capital - expected) > 1.00:
-                                        logger.warning(
-                                            "Boot capital reconciliation: resolved ₹%.2f but trades ledger implies "
-                                            "₹%.2f (drift ₹%.2f). Using ledger truth.",
-                                            self.initial_capital,
-                                            expected,
-                                            self.initial_capital - expected,
-                                        )
-                                        self.initial_capital = expected
-                    except Exception as rec_exc:
-                        logger.warning(
-                            "Could not reconcile boot capital with trades ledger: %s",
-                            rec_exc,
-                        )
+                    await self._reconcile_boot_capital_with_ledger()
 
                 # Sync paper broker's internal capital whenever the factory
                 # resolved to PaperBroker (mode=paper OR paper-mapped name).
@@ -6034,6 +6023,44 @@ class UltraBotEngine:
     # ------------------------------------------------------------------
     # Paper-broker capital alignment
     # ------------------------------------------------------------------
+
+    async def _reconcile_boot_capital_with_ledger(self) -> None:
+        """Anchor boot capital to trades-ledger truth (self-healing carry-forward).
+
+        Extracted from start()'s new-day path so the SAME reconciliation also
+        runs on the same-day resume path (mid-day restart): recover_state()
+        restores the session's stored initial_capital, but the all-time trades
+        ledger is the source of truth — if the resolved capital drifts from
+        base + SUM(net_pnl) by more than ₹1.00, the ledger value wins.
+
+        Fail-open: any error is logged as a warning and capital is left as-is.
+        """
+        try:
+            async with self._repo_context() as repo:
+                if repo is not None:
+                    trades_count = 0
+                    if hasattr(repo, "get_trade_count"):
+                        trades_count = await repo.get_trade_count()
+                    elif hasattr(repo, "_count"):
+                        from db.migrations import Trade
+                        trades_count = await repo._count(Trade)
+
+                    if trades_count > 0 and hasattr(repo, "get_all_time_realized_net"):
+                        expected = resolve_total_capital(config=self.config) + await repo.get_all_time_realized_net()
+                        if abs(self.initial_capital - expected) > 1.00:
+                            logger.warning(
+                                "Boot capital reconciliation: resolved ₹%.2f but trades ledger implies "
+                                "₹%.2f (drift ₹%.2f). Using ledger truth.",
+                                self.initial_capital,
+                                expected,
+                                self.initial_capital - expected,
+                            )
+                            self.initial_capital = expected
+        except Exception as rec_exc:
+            logger.warning(
+                "Could not reconcile boot capital with trades ledger: %s",
+                rec_exc,
+            )
 
     def _sync_paper_broker_capital(self) -> None:
         """Align the PaperBroker ledger with the engine's current capital.
