@@ -57,6 +57,10 @@ class DailyRiskManager:
             or 30
         )
 
+    @property
+    def fee_breakeven_tolerance_rupees(self) -> float:
+        return float(self.config.get("fee_breakeven_tolerance_rupees", 60.0))
+
     def _max_daily_loss_rupee(self) -> float:
         return self.total_capital * (self.max_daily_loss_pct / 100.0)
 
@@ -214,7 +218,7 @@ class DailyRiskManager:
         if self.daily_pnl <= -self._max_daily_loss_rupee():
             self._enter_cooloff()
 
-    def record_trade_result(self, pnl: float) -> None:
+    def record_trade_result(self, pnl: float, gross_pnl: Optional[float] = None) -> None:
         """Record a completed trade's P&L and update counters."""
         self.daily_pnl += pnl
         self.daily_trades += 1
@@ -223,17 +227,32 @@ class DailyRiskManager:
         if current_capital > self.peak_capital:
             self.peak_capital = current_capital
 
-        if pnl > 0:
+        # Differentiate friction / fee-only exits:
+        # A trade is considered BREAKEVEN (not a consecutive loss) if:
+        # 1. gross_pnl is supplied and >= 0.0 (market movement was flat/favorable, loss was purely statutory fees)
+        # 2. Or net loss is within fee friction tolerance (e.g. >= -fee_breakeven_tolerance_rupees, default ₹60)
+        # 3. Or net pnl is exactly 0.0
+        is_breakeven = False
+        if gross_pnl is not None and gross_pnl == 0.0:
+            is_breakeven = True
+        elif gross_pnl is not None and gross_pnl >= 0.0 and pnl <= 0.0:
+            # Market move was favorable/flat; friction/fee took net into minus
+            is_breakeven = True
+        elif pnl < 0.0 and abs(pnl) <= self.fee_breakeven_tolerance_rupees:
+            is_breakeven = True
+
+        # Win classification: technical price move was profitable
+        if (gross_pnl is not None and gross_pnl > 0.0) or (pnl > 0.0):
             self.wins += 1
             self.consecutive_losses = 0
-        elif pnl < 0:
+        elif is_breakeven or pnl == 0.0:
+            self.breakeven += 1
+            # Flat/friction breakeven preserves streak without incrementing consecutive loss count
+        else:
             self.losses += 1
             self.consecutive_losses += 1
             if self.consecutive_losses >= self.max_consecutive_losses:
                 self._enter_cooloff()
-        else:
-            self.breakeven += 1
-            self.consecutive_losses = 0
 
         if self.daily_pnl <= -self._max_daily_loss_rupee():
             self._enter_cooloff()

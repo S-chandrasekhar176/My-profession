@@ -272,7 +272,10 @@ class AlertManager:
             mode = data_dict.get("mode", "")
             broker = data_dict.get("broker", "")
             details = data_dict.get("details") or data_dict.get("message") or ""
-            return await self.telegram_bot.send_engine_status(state=state, mode=mode, broker=broker, details=details)
+            capital = data_dict.get("capital")
+            if capital is None and hasattr(self, "_engine") and self._engine is not None:
+                capital = getattr(self._engine, "initial_capital", None)
+            return await self.telegram_bot.send_engine_status(state=state, mode=mode, broker=broker, details=details, capital=capital)
 
         # 8. Error alert
         elif alert_type in ("error_alert", "error"):

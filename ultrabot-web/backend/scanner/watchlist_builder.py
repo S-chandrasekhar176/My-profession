@@ -385,8 +385,8 @@ class WatchlistBuilder:
             except Exception as tech_err:
                 logger.warning("TechnicalScanner error: %s", tech_err)
 
-            # Build market data for Kronos Scanner in parallel
-            sem = asyncio.Semaphore(15)
+            # Build market data for Kronos Scanner with bounded concurrency & inter-request pacing
+            sem = asyncio.Semaphore(5)
 
             async def _fetch_sym(sym: str) -> None:
                 async with sem:
@@ -394,10 +394,14 @@ class WatchlistBuilder:
                         daily_candles = None
                         try:
                             daily_candles = await feed.get_candles(sym, timeframe="1d", count=3)
+                            if not type(feed).__name__.startswith("Mock"):
+                                await asyncio.sleep(0.15)
                         except Exception:
                             pass
 
                         candles = await feed.get_candles(sym, timeframe="15m", count=30)
+                        if not type(feed).__name__.startswith("Mock"):
+                            await asyncio.sleep(0.15)
 
                         # ── Freshness guard (Phase 5) ─────────────────────
                         # Delisted/suspended symbols can still serve OLD

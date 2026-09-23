@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from core.market_hours import MarketHours, IST
 from feeds.base import BaseFeed
 from feeds.yahoo_historical import YahooHistoricalFeed
+from utils.market_utils import get_last_candle_age_minutes
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,11 @@ class FeedManager:
         backup: Optional[BaseFeed] = None,
         watchdog_interval_seconds: float = 120.0,
         market_hours: Optional[MarketHours] = None,
+        aggregator: Optional[Any] = None,
     ):
         self.primary = primary or YahooHistoricalFeed()
         self.backup = backup
+        self.aggregator = aggregator
         self.market_hours = market_hours or MarketHours()
         self._using_backup = False
         self._primary_failure_count = 0
@@ -74,18 +77,72 @@ class FeedManager:
 
         return 0.0
 
+    @staticmethod
+    def _get_max_candle_age_minutes(timeframe: str) -> float:
+        """Dynamically scale freshness threshold by timeframe interval."""
+        tf = timeframe.lower()
+        if tf in ("1m", "1min"):
+            return 5.0
+        elif tf in ("3m", "3min"):
+            return 8.0
+        elif tf in ("5m", "5min"):
+            return 12.0
+        elif tf in ("10m", "10min"):
+            return 20.0
+        elif tf in ("15m", "15min"):
+            return 30.0
+        elif tf in ("30m", "30min"):
+            return 60.0
+        elif tf in ("60m", "1h", "60min"):
+            return 120.0
+        elif tf in ("1d", "d", "day"):
+            return 1440.0
+        return 30.0
+
     async def get_candles(
         self,
         symbol: str,
         timeframe: str = "5m",
         count: int = 100,
+        force_refresh: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Get candles, trying primary first, then backup."""
+        # Phase 1: Fast in-memory check to bypass REST rate limits completely
+        if not force_refresh and self.aggregator is not None:
+            mem_candles = self.aggregator.get_candles(symbol, timeframe, count=count)
+            if mem_candles and len(mem_candles) >= min(count, 5):
+                is_stale = False
+                try:
+                    if hasattr(self.market_hours, "is_market_open") and self.market_hours.is_market_open():
+                        age = get_last_candle_age_minutes(mem_candles)
+                        # Dynamically scale allowed age by timeframe to avoid false-stale REST fallbacks
+                        # on higher timeframes (e.g. 60m, 1d).
+                        max_allowed_age = self._get_max_candle_age_minutes(timeframe)
+                        if age is not None and age > max_allowed_age:
+                            is_stale = True
+                            logger.debug(
+                                "In-memory candles for %s are stale (age=%.1fm > max=%.1fm for %s). Falling back to feed fetch.",
+                                symbol, age, max_allowed_age, timeframe,
+                            )
+                except Exception:
+                    is_stale = False
+
+                if not is_stale:
+                    return mem_candles
+
         if not self._using_backup:
             try:
-                candles = await self.primary.get_candles(symbol, timeframe, count)
+                try:
+                    candles = await self.primary.get_candles(symbol, timeframe, count, force_refresh=force_refresh)
+                except TypeError:
+                    candles = await self.primary.get_candles(symbol, timeframe, count)
+
                 # Only update last_successful_fetch_time when data is genuinely non-empty
                 if candles and len(candles) > 0:
+                    if self.aggregator is not None:
+                        try:
+                            self.aggregator.seed_candles(symbol, timeframe, candles)
+                        except Exception as seed_err:
+                            logger.debug("Failed to seed aggregator for %s: %s", symbol, seed_err)
                     self._primary_failure_count = 0
                     self._primary_healthy = True
                     self._last_successful_fetch_time = time.time()
@@ -102,8 +159,17 @@ class FeedManager:
 
         if self.backup is not None:
             try:
-                candles = await self.backup.get_candles(symbol, timeframe, count)
-                if candles:
+                try:
+                    candles = await self.backup.get_candles(symbol, timeframe, count, force_refresh=force_refresh)
+                except TypeError:
+                    candles = await self.backup.get_candles(symbol, timeframe, count)
+
+                if candles and len(candles) > 0:
+                    if self.aggregator is not None:
+                        try:
+                            self.aggregator.seed_candles(symbol, timeframe, candles)
+                        except Exception as seed_err:
+                            logger.debug("Failed to seed aggregator from backup for %s: %s", symbol, seed_err)
                     return candles
             except Exception as e:
                 logger.warning("Backup feed candle error for %s: %s", symbol, e)

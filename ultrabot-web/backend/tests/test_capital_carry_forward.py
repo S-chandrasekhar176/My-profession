@@ -271,3 +271,72 @@ async def test_live_mode_available_zero_preserved_without_falling_through_to_tot
     assert res["status"] == "started"
     # Must resolve to 0.0 (the explicit available margin), NOT fall through to total (500000.0)
     assert engine.initial_capital == 0.0
+
+
+@pytest.mark.asyncio
+async def test_weekend_carry_forward_regression_friday_to_monday():
+    """Weekend carry-forward regression guard:
+    Friday-ending summary row + boot dated Monday -> asserts Friday's ending is carried.
+    Documents that get_latest_prior_daily_summary (repository.py:1230-1239) is weekend-safe
+    and guards the behavior against regressions across date gaps.
+    """
+    from unittest.mock import patch
+
+    repo = FakeRepoWithSummaries()
+    friday_str = "2026-09-18"  # Friday
+    monday_str = "2026-09-21"  # Monday
+    repo.summaries.append(FakeDailySummary(friday_str, ending_capital=496342.55, net_pnl=-3657.45))
+
+    # 1. Direct repository method contract test with before_date=Monday
+    prior = await repo.get_latest_prior_daily_summary(before_date=monday_str)
+    assert prior is not None
+    assert prior.date == friday_str
+    assert prior.ending_capital == 496342.55
+
+    # 2. Engine boot on Monday carrying forward Friday's ending capital
+    engine = create_engine(repo, carry_forward=True, virtual_capital=500000.0)
+    fake_monday_dt = datetime(2026, 9, 21, 9, 15, 0, tzinfo=IST)
+    with patch("core.engine.datetime") as mock_dt:
+        mock_dt.now.return_value = fake_monday_dt
+        mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+        res = await engine.start(mode="paper", broker_name="paper", initial_capital=None)
+
+    assert res["status"] == "started"
+    assert engine.initial_capital == 496342.55
+
+
+@pytest.mark.asyncio
+async def test_repository_weekend_carry_forward_sql_query():
+    """Direct SQL repository test: Friday summary + Monday query -> weekend-safe."""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    from db.migrations import Base, DailySummary
+    from db.repository import Repository
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        repo = Repository(session)
+
+        # Friday-ending summary row
+        friday_summary = DailySummary(
+            date="2026-09-18",
+            ending_capital=496342.55,
+            starting_capital=500000.0,
+            net_pnl=-3657.45,
+            total_trades=5,
+            wins=2,
+            losses=3,
+        )
+        session.add(friday_summary)
+        await session.commit()
+
+        # Query dated Monday
+        prior = await repo.get_latest_prior_daily_summary(before_date="2026-09-21")
+        assert prior is not None
+        assert prior.date == "2026-09-18"
+        assert prior.ending_capital == 496342.55
+
+    await engine.dispose()

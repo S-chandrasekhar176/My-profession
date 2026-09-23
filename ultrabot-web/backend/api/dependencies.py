@@ -145,3 +145,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     except JWTError as exc:
         logger.warning("JWT validation failed: %s", exc)
         raise credentials_exception from exc
+
+
+oauth2_optional_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+
+async def get_optional_user(token: Optional[str] = Depends(oauth2_optional_scheme)) -> Optional[str]:
+    """Verify JWT token if present, otherwise return 'anonymous'."""
+    if not token:
+        return "anonymous"
+    try:
+        from api.routes.auth import is_token_revoked
+        if is_token_revoked(token):
+            return "anonymous"
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        return payload.get("sub") or "anonymous"
+    except Exception:
+        return "anonymous"
+

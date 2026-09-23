@@ -6,10 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+_fee_summary_cache: Dict[str, Any] = {"summary": None, "timestamp": 0.0}
+_FEE_SUMMARY_CACHE_TTL = 30.0  # seconds
 
 from sqlalchemy import select, update, delete, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -271,6 +275,16 @@ class Repository:
     async def delete_trade(self, trade_id: str) -> bool:
         return await self._delete_by_id(Trade, trade_id)
 
+    async def get_trade_count(self) -> int:
+        return await self._count(Trade)
+
+    async def get_all_time_realized_net(self) -> float:
+        """SELECT COALESCE(SUM(net_pnl), 0) FROM trades."""
+        stmt = select(func.coalesce(func.sum(Trade.net_pnl), 0.0))
+        result = await self.session.execute(stmt)
+        val = result.scalar()
+        return float(val or 0.0)
+
     async def get_todays_pnl(self) -> Dict[str, Any]:
         """Get today's aggregate P&L."""
         today = _today_str()
@@ -285,21 +299,140 @@ class Repository:
         # trade and broke gross − fees = net on the dashboard.
         total_fees = sum((t.fees or 0.0) for t in closed)
         net_pnl = sum((t.net_pnl or 0.0) for t in closed)
-        wins = sum(1 for t in closed if t.net_pnl > 0)
-        losses = sum(1 for t in closed if t.net_pnl < 0)
+        gross_wins = sum(1 for t in closed if (t.pnl or 0.0) > 0)
+        gross_losses = sum(1 for t in closed if (t.pnl or 0.0) < 0)
+        net_wins = sum(1 for t in closed if (t.net_pnl or 0.0) > 0)
+        net_losses = sum(1 for t in closed if (t.net_pnl or 0.0) < 0)
         total = len(closed)
         return {
             "date": today,
             "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": (wins / total * 100) if total > 0 else 0.0,
+            "wins": gross_wins,
+            "losses": gross_losses,
+            "win_rate": round(gross_wins / total * 100, 2) if total > 0 else 0.0,
+            "net_wins": net_wins,
+            "net_losses": net_losses,
+            "net_win_rate": round(net_wins / total * 100, 2) if total > 0 else 0.0,
             "gross_pnl": round(gross_pnl, 2),
             "total_fees": round(total_fees, 2),
             "net_pnl": round(net_pnl, 2),
             "best_trade": round(max((t.net_pnl for t in closed), default=0), 2),
             "worst_trade": round(min((t.net_pnl for t in closed), default=0), 2),
         }
+
+    async def get_multi_timeframe_fee_summary(
+        self,
+        custom_start: Optional[str] = None,
+        custom_end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate Gross P&L, Total Fees, and Net P&L across multiple timeframes:
+        today, week, month, year, overall, and custom range.
+        """
+        now_ts = time.time()
+        if not custom_start and not custom_end:
+            if _fee_summary_cache["summary"] is not None and (now_ts - _fee_summary_cache["timestamp"] < _FEE_SUMMARY_CACHE_TTL):
+                return _fee_summary_cache["summary"]
+
+        stmt = (
+            select(Trade)
+            .where(Trade.status == "CLOSED")
+            .order_by(Trade.exit_time.desc())
+        )
+        res = await self.session.execute(stmt)
+        all_closed: List[Trade] = list(res.scalars().all())
+
+        now_dt = datetime.now(IST)
+        today_date = now_dt.date()
+        today_iso = today_date.isoformat()
+        week_start_iso = (today_date - timedelta(days=today_date.weekday())).isoformat()
+        month_start_iso = today_date.replace(day=1).isoformat()
+        year_start_iso = today_date.replace(month=1, day=1).isoformat()
+
+        def _compute_bucket(trades: List[Trade], label: str, start: Optional[str] = None, end: Optional[str] = None) -> Dict[str, Any]:
+            total = len(trades)
+            if total == 0:
+                return {
+                    "timeframe": label,
+                    "start_date": start,
+                    "end_date": end,
+                    "total_trades": 0,
+                    "gross_wins": 0,
+                    "gross_losses": 0,
+                    "gross_win_rate": 0.0,
+                    "net_wins": 0,
+                    "net_losses": 0,
+                    "net_win_rate": 0.0,
+                    "gross_pnl": 0.0,
+                    "total_fees": 0.0,
+                    "net_pnl": 0.0,
+                    "best_trade": 0.0,
+                    "worst_trade": 0.0,
+                    "avg_trade_fee": 0.0,
+                    "fee_drag_pct": 0.0,
+                }
+            gross_pnl = sum(float(t.pnl or 0.0) for t in trades)
+            total_fees = sum(float(t.fees or 0.0) for t in trades)
+            net_pnl = sum(float(t.net_pnl or 0.0) for t in trades)
+            gross_wins = sum(1 for t in trades if (t.pnl or 0.0) > 0)
+            gross_losses = sum(1 for t in trades if (t.pnl or 0.0) < 0)
+            net_wins = sum(1 for t in trades if (t.net_pnl or 0.0) > 0)
+            net_losses = sum(1 for t in trades if (t.net_pnl or 0.0) < 0)
+            best_trade = max((float(t.net_pnl or 0.0) for t in trades), default=0.0)
+            worst_trade = min((float(t.net_pnl or 0.0) for t in trades), default=0.0)
+            avg_fee = total_fees / total if total > 0 else 0.0
+            fee_drag = (total_fees / gross_pnl * 100.0) if gross_pnl > 0 else 0.0
+
+            return {
+                "timeframe": label,
+                "start_date": start,
+                "end_date": end,
+                "total_trades": total,
+                "gross_wins": gross_wins,
+                "gross_losses": gross_losses,
+                "gross_win_rate": round(gross_wins / total * 100.0, 1),
+                "net_wins": net_wins,
+                "net_losses": net_losses,
+                "net_win_rate": round(net_wins / total * 100.0, 1),
+                "gross_pnl": round(gross_pnl, 2),
+                "total_fees": round(total_fees, 2),
+                "net_pnl": round(net_pnl, 2),
+                "best_trade": round(best_trade, 2),
+                "worst_trade": round(worst_trade, 2),
+                "avg_trade_fee": round(avg_fee, 2),
+                "fee_drag_pct": round(fee_drag, 1),
+            }
+
+        def _get_trade_date(t: Trade) -> str:
+            ts = t.exit_time or t.entry_time or ""
+            return ts[:10] if len(ts) >= 10 else ""
+
+        today_trades = [t for t in all_closed if _get_trade_date(t) == today_iso]
+        week_trades = [t for t in all_closed if _get_trade_date(t) >= week_start_iso]
+        month_trades = [t for t in all_closed if _get_trade_date(t) >= month_start_iso]
+        year_trades = [t for t in all_closed if _get_trade_date(t) >= year_start_iso]
+
+        summary = {
+            "today": _compute_bucket(today_trades, "today", today_iso, today_iso),
+            "week": _compute_bucket(week_trades, "week", week_start_iso, today_iso),
+            "month": _compute_bucket(month_trades, "month", month_start_iso, today_iso),
+            "year": _compute_bucket(year_trades, "year", year_start_iso, today_iso),
+            "overall": _compute_bucket(all_closed, "overall", None, today_iso),
+        }
+
+        if custom_start or custom_end:
+            c_start = custom_start or "1970-01-01"
+            c_end = custom_end or today_iso
+            custom_trades = [
+                t for t in all_closed
+                if c_start <= _get_trade_date(t) <= c_end
+            ]
+            summary["custom"] = _compute_bucket(custom_trades, "custom", custom_start, custom_end)
+
+        if not custom_start and not custom_end:
+            _fee_summary_cache["summary"] = summary
+            _fee_summary_cache["timestamp"] = now_ts
+
+        return summary
 
     # ────────────────────────────────────────
     # SIGNALS
@@ -581,25 +714,27 @@ class Repository:
                 "source": "trades_ledger",
             }
 
-        wins = [t for t in trades if float(t.net_pnl or 0.0) > 0]
-        losses = [t for t in trades if float(t.net_pnl or 0.0) < 0]
-        breakeven = total - len(wins) - len(losses)
+        gross_wins = [t for t in trades if float(t.pnl or 0.0) > 0]
+        gross_losses = [t for t in trades if float(t.pnl or 0.0) < 0]
+        net_wins = [t for t in trades if float(t.net_pnl or 0.0) > 0]
+        net_losses = [t for t in trades if float(t.net_pnl or 0.0) < 0]
+        breakeven = total - len(gross_wins) - len(gross_losses)
 
-        gross_win = sum(float(t.net_pnl or 0.0) for t in wins)
-        gross_loss = abs(sum(float(t.net_pnl or 0.0) for t in losses))
+        gross_win_amount = sum(float(t.pnl or 0.0) for t in gross_wins)
+        gross_loss_amount = abs(sum(float(t.pnl or 0.0) for t in gross_losses))
         total_pnl = sum(float(t.net_pnl or 0.0) for t in trades)
 
         holdings = [float(t.holding_duration_seconds or 0.0) for t in trades if t.holding_duration_seconds]
 
-        # Consecutive win/loss streaks over the ordered ledger
+        # Consecutive win/loss streaks over the ordered ledger (based on gross price movement)
         max_con_wins = max_con_losses = 0
         cur_wins = cur_losses = 0
         for t in trades:
-            pnl = float(t.net_pnl or 0.0)
-            if pnl > 0:
+            pnl_val = float(t.pnl or 0.0)
+            if pnl_val > 0:
                 cur_wins += 1
                 cur_losses = 0
-            elif pnl < 0:
+            elif pnl_val < 0:
                 cur_losses += 1
                 cur_wins = 0
             else:
@@ -609,14 +744,17 @@ class Repository:
 
         return {
             "total_trades": total,
-            "wins": len(wins),
-            "losses": len(losses),
+            "wins": len(gross_wins),
+            "losses": len(gross_losses),
+            "net_wins": len(net_wins),
+            "net_losses": len(net_losses),
             "breakeven": breakeven,
-            "win_rate": round(len(wins) / total * 100.0, 2),
-            "avg_win": round(gross_win / len(wins), 2) if wins else 0.0,
-            "avg_loss": round(-gross_loss / len(losses), 2) if losses else 0.0,
+            "win_rate": round(len(gross_wins) / total * 100.0, 2),
+            "net_win_rate": round(len(net_wins) / total * 100.0, 2),
+            "avg_win": round(gross_win_amount / len(gross_wins), 2) if gross_wins else 0.0,
+            "avg_loss": round(-gross_loss_amount / len(gross_losses), 2) if gross_losses else 0.0,
             "total_pnl": round(total_pnl, 2),
-            "profit_factor": round(gross_win / gross_loss, 3) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0),
+            "profit_factor": round(gross_win_amount / gross_loss_amount, 3) if gross_loss_amount > 0 else (999.0 if gross_win_amount > 0 else 0.0),
             "avg_holding_seconds": round(sum(holdings) / len(holdings), 1) if holdings else 0.0,
             "max_consecutive_wins": max_con_wins,
             "max_consecutive_losses": max_con_losses,
@@ -736,25 +874,38 @@ class Repository:
                     "total_trades": 0,
                     "wins": 0,
                     "losses": 0,
+                    "net_wins": 0,
+                    "net_losses": 0,
                     "total_pnl": 0.0,
+                    "gross_pnl": 0.0,
                 },
             )
-            pnl = float(t.net_pnl or 0.0)
+            net_pnl = float(t.net_pnl or 0.0)
+            gross_pnl = float(t.pnl or 0.0)
             entry["total_trades"] += 1
-            entry["total_pnl"] += pnl
-            if pnl > 0:
+            entry["total_pnl"] += net_pnl
+            entry["gross_pnl"] += gross_pnl
+            if gross_pnl > 0:
                 entry["wins"] += 1
-            elif pnl < 0:
+            elif gross_pnl < 0:
                 entry["losses"] += 1
+
+            if net_pnl > 0:
+                entry["net_wins"] += 1
+            elif net_pnl < 0:
+                entry["net_losses"] += 1
 
         rows = []
         for entry in buckets.values():
             decided = entry["wins"] + entry["losses"]
+            net_decided = entry["net_wins"] + entry["net_losses"]
             rows.append(
                 {
                     **entry,
                     "total_pnl": round(entry["total_pnl"], 2),
+                    "gross_pnl": round(entry["gross_pnl"], 2),
                     "win_rate": round(entry["wins"] / decided * 100.0, 2) if decided > 0 else 0.0,
+                    "net_win_rate": round(entry["net_wins"] / net_decided * 100.0, 2) if net_decided > 0 else 0.0,
                 }
             )
         rows.sort(key=lambda r: (r["strategy"], r["regime"]))
@@ -1266,6 +1417,24 @@ class Repository:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_shadow_outcomes_history(
+        self,
+        limit: Optional[int] = None,
+        min_outcome_date: Optional[str] = None,
+        only_resolved: bool = True,
+    ) -> List[ShadowOutcome]:
+        """Fetch historical shadow outcomes across dates for chronological walk-forward ML training."""
+        stmt = select(ShadowOutcome)
+        if min_outcome_date:
+            stmt = stmt.where(ShadowOutcome.created_at >= min_outcome_date)
+        if only_resolved:
+            stmt = stmt.where(ShadowOutcome.outcome.in_(["SHADOW_TARGET", "SHADOW_SL", "SHADOW_TIME_STOP", "SHADOW_EXPIRED"]))
+        stmt = stmt.order_by(ShadowOutcome.created_at.asc())
+        if limit is not None and limit > 0:
+            stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_shadow_clock(self) -> Dict[str, Any]:
         """Aggregate today's resolved shadow outcomes into the ML clock.
 
@@ -1515,3 +1684,169 @@ class Repository:
             "rows_with_session": with_session,
             "by_kind": by_kind,
         }
+
+    # ------------------------------------------------------------------
+    # Option Snapshots (Phase 2)
+    # ------------------------------------------------------------------
+
+    async def create_option_snapshot(
+        self,
+        underlying_symbol: str,
+        spot_price: float,
+        expiry: str,
+        atm_strike: float,
+        pcr: float = 1.0,
+        max_pain: Optional[float] = None,
+        total_ce_oi: int = 0,
+        total_pe_oi: int = 0,
+        tier: str = "tradable",
+        chain_data: Optional[List[Dict[str, Any]]] = None,
+        timestamp: Optional[str] = None,
+        expiry_epoch: Optional[int] = None,
+    ):
+        """Persist an option chain snapshot to database."""
+        from db.migrations import OptionSnapshot
+        import json
+
+        now_str = timestamp or datetime.now(IST).isoformat()
+        chain_json = json.dumps(chain_data or [])
+
+        snapshot = OptionSnapshot(
+            timestamp=now_str,
+            underlying_symbol=underlying_symbol.upper(),
+            spot_price=float(spot_price),
+            expiry=str(expiry),
+            expiry_epoch=expiry_epoch,
+            atm_strike=float(atm_strike),
+            max_pain=float(max_pain) if max_pain is not None else None,
+            pcr=float(pcr),
+            total_ce_oi=int(total_ce_oi),
+            total_pe_oi=int(total_pe_oi),
+            tier=str(tier),
+            chain_json=chain_json,
+        )
+        self.session.add(snapshot)
+        await self.session.commit()
+        await self.session.refresh(snapshot)
+        return snapshot
+
+    async def get_latest_option_snapshots(
+        self,
+        underlying_symbol: str,
+        limit: int = 50,
+        expiry: Optional[str] = None,
+    ):
+        """Fetch the most recent option snapshots for an underlying symbol."""
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select
+
+        stmt = select(OptionSnapshot).where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
+        if expiry:
+            stmt = stmt.where(OptionSnapshot.expiry == expiry)
+        stmt = stmt.order_by(OptionSnapshot.timestamp.desc()).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_symbol_expiries(self, underlying_symbol: str) -> List[str]:
+        """Fetch all unique recorded expiry dates for an underlying symbol."""
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select, distinct
+
+        stmt = (
+            select(distinct(OptionSnapshot.expiry))
+            .where(OptionSnapshot.underlying_symbol == underlying_symbol.upper())
+            .order_by(OptionSnapshot.expiry.asc())
+        )
+        result = await self.session.execute(stmt)
+        return [str(r[0]) for r in result.fetchall() if r[0]]
+
+    async def get_historical_atm_ivs(
+        self,
+        underlying_symbol: str,
+        lookback_days: int = 90,
+    ) -> List[float]:
+        """Fetch historical ATM IV values from recorded snapshots."""
+        import json
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import select
+
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(days=lookback_days)).isoformat()
+        stmt = (
+            select(OptionSnapshot)
+            .where(
+                OptionSnapshot.underlying_symbol == underlying_symbol.upper(),
+                OptionSnapshot.timestamp >= cutoff,
+            )
+            .order_by(OptionSnapshot.timestamp.asc())
+        )
+        result = await self.session.execute(stmt)
+        snapshots = result.scalars().all()
+        ivs = []
+        for s in snapshots:
+            try:
+                chain = json.loads(s.chain_json) if s.chain_json else []
+                atm_call = next((c for c in chain if c.get("strike") == s.atm_strike and c.get("option_type") == "CE"), None)
+                if atm_call and float(atm_call.get("iv", 0.0) or 0.0) > 0:
+                    ivs.append(float(atm_call["iv"]))
+                elif chain:
+                    valid_strikes = [c for c in chain if float(c.get("iv", 0.0) or 0.0) > 0]
+                    if valid_strikes:
+                        ivs.append(float(valid_strikes[0]["iv"]))
+            except Exception:
+                continue
+        return ivs
+
+    async def get_iv_rank_and_percentile(
+        self,
+        underlying_symbol: str,
+        current_iv: float,
+        lookback_days: int = 90,
+    ) -> Dict[str, Any]:
+        """Calculate IV Rank and IV Percentile from historical option snapshots."""
+        from options.greeks import GreeksCalculator
+
+        historical_ivs = await self.get_historical_atm_ivs(underlying_symbol, lookback_days=lookback_days)
+        if not historical_ivs or current_iv <= 0:
+            return {
+                "symbol": underlying_symbol.upper(),
+                "current_iv": current_iv,
+                "iv_rank": 50.0,
+                "iv_percentile": 50.0,
+                "min_iv": current_iv,
+                "max_iv": current_iv,
+                "samples_count": len(historical_ivs),
+                "lookback_days": lookback_days,
+                "has_sufficient_history": False,
+            }
+
+        min_iv = min(historical_ivs)
+        max_iv = max(historical_ivs)
+        ivr = GreeksCalculator.compute_iv_rank(current_iv, min_iv, max_iv)
+        ivp = GreeksCalculator.compute_iv_percentile(current_iv, historical_ivs)
+
+        return {
+            "symbol": underlying_symbol.upper(),
+            "current_iv": round(current_iv, 4),
+            "iv_rank": ivr,
+            "iv_percentile": ivp,
+            "min_iv": round(min_iv, 4),
+            "max_iv": round(max_iv, 4),
+            "samples_count": len(historical_ivs),
+            "lookback_days": lookback_days,
+            "has_sufficient_history": len(historical_ivs) >= 10,
+        }
+
+    async def prune_option_snapshots(self, keep_days: int = 14) -> int:
+        """Delete option snapshots older than keep_days days to prevent unbounded SQLite growth."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        from db.migrations import OptionSnapshot
+        from sqlalchemy import delete
+
+        cutoff = (datetime.now(ZoneInfo("Asia/Kolkata")) - timedelta(days=keep_days)).isoformat()
+        stmt = delete(OptionSnapshot).where(OptionSnapshot.timestamp < cutoff)
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return result.rowcount if hasattr(result, "rowcount") else 0

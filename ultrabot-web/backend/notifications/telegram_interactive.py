@@ -34,6 +34,16 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -83,7 +93,11 @@ def _fmt_money(val: Any) -> str:
         return "\u20b9—"
 
 
-def compute_pnl_view(pnl: Optional[Dict[str, Any]], open_positions: Optional[List[Any]]) -> Dict[str, float]:
+def compute_pnl_view(
+    pnl: Optional[Dict[str, Any]],
+    open_positions: Optional[List[Any]],
+    live_prices: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
     """Map today's P&L into {realized, unrealized, total} for the /pnl command.
 
     v0.4.12.1 hotfix (live 2026-09-07): the handler previously read
@@ -93,7 +107,7 @@ def compute_pnl_view(pnl: Optional[Dict[str, Any]], open_positions: Optional[Lis
 
     - realized   = net P&L of today's CLOSED trades (repo ``net_pnl``).
     - unrealized = direction-aware MTM of open positions from
-      ``current_price`` (same math as the dashboard stats endpoint),
+      live_prices or ``current_price`` (same math as the dashboard stats endpoint),
       because ``positions.unrealized_pnl`` is not maintained by the engine.
     - total      = realized + unrealized.
     """
@@ -111,12 +125,25 @@ def compute_pnl_view(pnl: Optional[Dict[str, Any]], open_positions: Optional[Lis
     unrealized = 0.0
     for p in open_positions or []:
         try:
-            entry = float(getattr(p, "entry_price", 0) or 0)
-            current = float(getattr(p, "current_price", 0) or 0) or entry
-            qty = float(getattr(p, "quantity", getattr(p, "qty", 0)) or 0)
+            if isinstance(p, dict):
+                entry = float(p.get("entry_price", 0) or 0)
+                sym = str(p.get("symbol", "") or "").upper()
+                current = float(live_prices.get(sym, 0.0)) if (live_prices and sym in live_prices) else 0.0
+                if current <= 0:
+                    current = float(p.get("current_price", 0) or 0) or entry
+                qty = float(p.get("quantity", p.get("qty", 0)) or 0)
+                direction = str(p.get("direction", "")).upper()
+            else:
+                entry = float(getattr(p, "entry_price", 0) or 0)
+                sym = str(getattr(p, "symbol", "") or "").upper()
+                current = float(live_prices.get(sym, 0.0)) if (live_prices and sym in live_prices) else 0.0
+                if current <= 0:
+                    current = float(getattr(p, "current_price", 0) or 0) or entry
+                qty = float(getattr(p, "quantity", getattr(p, "qty", 0)) or 0)
+                direction = str(getattr(p, "direction", "")).upper()
+
             if entry <= 0 or qty <= 0:
                 continue
-            direction = str(getattr(p, "direction", "")).upper()
             sign = 1 if direction in ("BUY", "LONG") else -1
             unrealized += (current - entry) * qty * sign
         except (TypeError, ValueError, AttributeError):
@@ -127,6 +154,112 @@ def compute_pnl_view(pnl: Optional[Dict[str, Any]], open_positions: Optional[Lis
         "unrealized": round(unrealized, 2),
         "total": round(realized + unrealized, 2),
     }
+
+
+class TelegramPollLock:
+    """Process-level advisory lockfile guard for Telegram interactive polling.
+
+    Prevents multiple processes (e.g. uvicorn reload workers or duplicate engines)
+    from concurrently polling Telegram getUpdates, which causes HTTP 409 Conflict.
+    """
+
+    def __init__(self, lockfile_path: str = "data/telegram_poll.lock"):
+        self.lockfile_path = lockfile_path
+        self._fh = None
+        self._locked = False
+
+    def acquire(self) -> Tuple[bool, Optional[int]]:
+        """Attempt to acquire exclusive lock non-blockingly.
+
+        Returns (True, my_pid) if acquired, (False, holder_pid) if locked by another process.
+        """
+        try:
+            lock_dir = os.path.dirname(os.path.abspath(self.lockfile_path))
+            if lock_dir:
+                os.makedirs(lock_dir, exist_ok=True)
+            if not os.path.exists(self.lockfile_path):
+                try:
+                    with open(self.lockfile_path, "a") as f:
+                        pass
+                except Exception:
+                    pass
+
+            fh = open(self.lockfile_path, "r+b")
+            self._fh = fh
+
+            if msvcrt is not None:
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    holder_pid = self._read_holder_pid(fh)
+                    fh.close()
+                    self._fh = None
+                    return False, holder_pid
+            elif fcntl is not None:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    holder_pid = self._read_holder_pid(fh)
+                    fh.close()
+                    self._fh = None
+                    return False, holder_pid
+
+            # Successfully locked - write byte 0 dummy marker and byte 1+ PID
+            fh.seek(0)
+            pid_bytes = b"X" + str(os.getpid()).encode("utf-8")
+            fh.write(pid_bytes)
+            fh.truncate()
+            fh.flush()
+            self._locked = True
+            return True, os.getpid()
+        except Exception as exc:
+            logger.warning("Failed to acquire telegram poll lock: %s", exc)
+            if self._fh:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+            return False, None
+
+    def _read_holder_pid(self, fh) -> Optional[int]:
+        try:
+            fh.seek(1)
+            raw = fh.read().decode("utf-8", errors="ignore").strip()
+            return int(raw) if raw.isdigit() else None
+        except Exception:
+            return None
+
+    def release(self) -> None:
+        """Release the advisory lock and close the file handle."""
+        if not self._locked or not self._fh:
+            if self._fh:
+                try:
+                    self._fh.close()
+                except Exception:
+                    pass
+                self._fh = None
+            self._locked = False
+            return
+        try:
+            if msvcrt is not None:
+                try:
+                    self._fh.seek(0)
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            elif fcntl is not None:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            self._fh.close()
+        except Exception as exc:
+            logger.debug("Error releasing telegram poll lock: %s", exc)
+        finally:
+            self._fh = None
+            self._locked = False
 
 
 class InteractiveTelegramBot:
@@ -149,6 +282,10 @@ class InteractiveTelegramBot:
         self._token = str(cfg.get("telegram_bot_token", "") or "").strip()
         self._chat_id = str(cfg.get("telegram_chat_id", "") or "").strip()
         self._poll_timeout = int(cfg.get("telegram_poll_timeout", 25))
+        self._poll_lock = TelegramPollLock(
+            lockfile_path=str(cfg.get("telegram_poll_lockfile", "data/telegram_poll.lock"))
+        )
+        self._poller_disabled = False
 
         self._offset = 0
         self._sent_cards: Dict[str, int] = {}      # opp_id -> telegram message_id
@@ -186,7 +323,7 @@ class InteractiveTelegramBot:
         the 11:16-IST 'bot stopped responding' failure mode.
         """
         try:
-            if self._stopping:
+            if self._stopping or getattr(self, "_poller_disabled", False):
                 return
             reason = "returned unexpectedly"
             if task.cancelled():
@@ -545,7 +682,8 @@ class InteractiveTelegramBot:
                         "🤖 <b>UltraBot commands</b>\n"
                         "/status — engine + session snapshot\n"
                         "/positions — open positions\n"
-                        "/pnl — today's P&amp;L\n"
+                        "/pnl — today's P&amp;L breakdown\n"
+                        "/fees — fee awareness (today, week, month, year, overall)\n"
                         "/pause — pause trading (no new entries)\n"
                         "/resume — resume trading\n"
                         "Opportunity cards arrive with Approve / Reject / Skip buttons."
@@ -566,9 +704,11 @@ class InteractiveTelegramBot:
                 trades = getattr(eng, "_trades_executed", 0)
                 pending = len(getattr(eng, "pending_opportunities", {}) or {})
                 session_id = getattr(eng, "session_id", None) or "—"
-                # v0.4.12.1 hotfix: engine counters reset on restart/auto-resume
-                # (live 09:42 restart showed Trades 0 with 3 trades in DB).
-                # The DB is the source of truth for today's executed trades.
+                total_cap = float(getattr(eng, "initial_capital", 0.0) or 0.0)
+
+                # Query open positions for capital usage
+                open_pos = []
+                pnl_summary = {}
                 if self.repo_getter is not None:
                     repo = await self.repo_getter()
                     try:
@@ -576,13 +716,28 @@ class InteractiveTelegramBot:
                             datetime.now(IST).date().isoformat(), limit=500
                         )
                         trades = len(todays_trades or [])
+                        open_pos = await repo.get_open_positions() or []
+                        pnl_summary = await repo.get_todays_pnl() or {}
                     except Exception:
                         pass  # keep in-memory counter as fallback
                     finally:
                         close = getattr(repo, "close", None)
                         if close:
                             await close()
+                if not open_pos and hasattr(eng, "positions") and eng.positions:
+                    open_pos = list(eng.positions.values())
+
+                used_amount = sum(
+                    float(getattr(p, "invested_amount", 0.0) or (float(getattr(p, "entry_price", 0.0) or 0.0) * float(getattr(p, "quantity", getattr(p, "qty", 0.0)) or 0.0)))
+                    for p in open_pos
+                )
+                remaining_cap = max(0.0, total_cap - used_amount)
                 run_min = int((datetime.now(IST) - self.started_at).total_seconds() // 60)
+                gross_s = float(pnl_summary.get("gross_pnl", 0.0) or 0.0)
+                fees_s = float(pnl_summary.get("total_fees", 0.0) or 0.0)
+                net_s = float(pnl_summary.get("net_pnl", gross_s - fees_s) or 0.0)
+                wr_s = float(pnl_summary.get("win_rate", 0.0) or 0.0)
+
                 await self._tg(
                     "sendMessage", chat_id=self._chat_id,
                     text=(
@@ -590,11 +745,15 @@ class InteractiveTelegramBot:
                         f"Engine: <b>{_esc(state)}</b> · up {run_min}m\n"
                         f"Session: <code>{_esc(session_id)}</code>\n"
                         f"Scans {scans} · Signals {signals} · Trades {trades}\n"
+                        f"Today: Gross <b>{_fmt_money(gross_s)}</b> · Fees <b>{_fmt_money(-fees_s)}</b> · Net <b>{_fmt_money(net_s)}</b> (WR: {wr_s:.0f}%)\n"
+                        f"Amount used for trades: ₹{used_amount:,.2f}\n"
+                        f"Remaining capital: ₹{remaining_cap:,.2f}\n"
                         f"Pending opportunities: {pending}"
                     ),
                     parse_mode="HTML",
                 )
             elif cmd == "/positions":
+                from utils.market_utils import get_lot_size, is_fno_stock
                 positions = []
                 if self.repo_getter is not None:
                     repo = await self.repo_getter()
@@ -604,18 +763,138 @@ class InteractiveTelegramBot:
                         close = getattr(repo, "close", None)
                         if close:
                             await close()
+                if not positions and hasattr(self.engine, "positions") and self.engine.positions:
+                    positions = list(self.engine.positions.values())
                 if not positions:
                     await self._tg("sendMessage", chat_id=self._chat_id, text="📭 No open positions.")
                     return
-                lines = ["📂 <b>Open positions</b>"]
+
+                lines = [f"📂 <b>OPEN POSITIONS ({len(positions)})</b>\n────────────────────────"]
+                feed = getattr(self.engine, "feed", None) or getattr(self.engine, "feed_manager", None)
                 for p in positions[:10]:
-                    sym = getattr(p, "symbol", "?")
-                    direction = getattr(p, "direction", "?")
-                    qty = getattr(p, "quantity", getattr(p, "qty", "?"))
-                    entry = getattr(p, "entry_price", 0)
-                    pnl = getattr(p, "unrealized_pnl", getattr(p, "pnl", None))
-                    pnl_txt = f" · {_fmt_money(pnl)}" if pnl is not None else ""
-                    lines.append(f"• {_esc(sym)} {direction} {qty} @ ₹{entry}{pnl_txt}")
+                    if isinstance(p, dict):
+                        sym = str(p.get("symbol", "?"))
+                        direction = str(p.get("direction", "?")).upper()
+                        strategy = str(p.get("strategy", "") or "").upper()
+                        qty = p.get("quantity", p.get("qty", "?"))
+                        entry = float(p.get("entry_price", 0.0) or 0.0)
+                        sl = float(p.get("stop_loss") or p.get("initial_sl") or 0.0)
+                        tgt = float(p.get("target") or p.get("initial_target") or 0.0)
+                        curr_px = float(p.get("current_price", 0.0) or 0.0)
+                        ext = p.get("extra")
+                        stages_fired = p.get("stages_fired")
+                    else:
+                        sym = str(getattr(p, "symbol", "?"))
+                        direction = str(getattr(p, "direction", "?")).upper()
+                        strategy = str(getattr(p, "strategy", "") or "").upper()
+                        qty = getattr(p, "quantity", getattr(p, "qty", "?"))
+                        entry = float(getattr(p, "entry_price", 0.0) or 0.0)
+                        sl = float(getattr(p, "stop_loss", 0.0) or getattr(p, "initial_sl", 0.0) or 0.0)
+                        tgt = float(getattr(p, "target", 0.0) or getattr(p, "initial_target", 0.0) or 0.0)
+                        curr_px = float(getattr(p, "current_price", 0.0) or 0.0)
+                        ext = getattr(p, "extra", None)
+                        stages_fired = getattr(p, "stages_fired", None)
+
+                    extra_dict = {}
+                    if isinstance(ext, str) and ext:
+                        try:
+                            extra_dict = json.loads(ext)
+                        except Exception:
+                            extra_dict = {}
+                    elif isinstance(ext, dict):
+                        extra_dict = ext
+
+                    if stages_fired is None:
+                        stages_fired = extra_dict.get("stages_fired")
+                    if not stages_fired:
+                        stages_fired = []
+                    elif not isinstance(stages_fired, list):
+                        try:
+                            stages_fired = list(stages_fired)
+                        except Exception:
+                            stages_fired = []
+
+                    stage_details = extra_dict.get("stage_details") or {}
+                    if not isinstance(stage_details, dict):
+                        stage_details = {}
+
+                    partial_realized = float(extra_dict.get("partial_realized_pnl", 0.0) or 0.0)
+
+                    try:
+                        lot = get_lot_size(sym) if is_fno_stock(sym) else 1
+                    except Exception:
+                        lot = 1
+
+                    ltp = 0.0
+                    if feed and hasattr(feed, "get_ltp") and sym and sym != "?":
+                        try:
+                            ltp = float(await feed.get_ltp(sym) or 0.0)
+                        except Exception:
+                            ltp = 0.0
+                    if not ltp or ltp <= 0:
+                        ltp = curr_px or entry
+
+                    sign = 1 if direction in ("BUY", "LONG") else -1
+                    strat_txt = f" ({strategy})" if strategy else ""
+                    dir_emoji = "🟢" if direction in ("BUY", "LONG") else "🔴"
+
+                    sl_txt = f"₹{sl:,.2f}" if sl > 0 else "—"
+                    tgt_txt = f"₹{tgt:,.2f}" if tgt > 0 else "—"
+
+                    if entry > 0 and ltp > 0:
+                        pnl = (ltp - entry) * float(qty or 0) * sign
+                        pnl_pct = ((ltp - entry) / entry) * 100.0 * sign
+                        pnl_str = f"{_fmt_money(pnl)} ({pnl_pct:+.2f}%)"
+                    else:
+                        pnl_str = "—"
+
+                    pnl_line = f"├ P&amp;L: <b>{pnl_str}</b>"
+                    if partial_realized > 0:
+                        pnl_line += f" · Realized: <b>{_fmt_money(partial_realized)}</b>"
+
+                    # Format stage booking statuses
+                    s1_status = "S1:✅ Lock" if 1 in stages_fired else "S1:⏳ Lock"
+
+                    if 2 in stages_fired:
+                        s2_pnl = stage_details.get("2", {}).get("pnl")
+                        if s2_pnl is not None:
+                            s2_status = f"S2:✅ 25% ({_fmt_money(s2_pnl)})"
+                        elif partial_realized > 0 and 3 not in stages_fired:
+                            s2_status = f"S2:✅ 25% ({_fmt_money(partial_realized)})"
+                        else:
+                            s2_status = "S2:✅ 25%"
+                    else:
+                        s2_status = "S2:⏳ 25%"
+
+                    if 3 in stages_fired:
+                        s3_pnl = stage_details.get("3", {}).get("pnl")
+                        if s3_pnl is not None:
+                            s3_status = f"S3:✅ 30% ({_fmt_money(s3_pnl)})"
+                        else:
+                            s3_status = "S3:✅ 30%"
+                    else:
+                        s3_status = "S3:⏳ 30%"
+
+                    if 4 in stages_fired:
+                        s4_pnl = stage_details.get("4", {}).get("pnl")
+                        if s4_pnl is not None:
+                            s4_status = f"S4:✅ Runner ({_fmt_money(s4_pnl)})"
+                        else:
+                            s4_status = "S4:✅ Runner"
+                    else:
+                        s4_status = "S4:⏳ Runner"
+
+                    stages_line = f"└ Stages: [{s1_status} | {s2_status} | {s3_status} | {s4_status}]"
+
+                    card = [
+                        f"\n{dir_emoji} <b>{_esc(sym)}</b> · {direction}{strat_txt} · Qty: <b>{qty}</b> (Lot: {lot})",
+                        f"├ Entry: ₹{entry:,.2f} ➔ Current Price: ₹{ltp:,.2f}",
+                        f"├ SL: {sl_txt} ➔ TGT: {tgt_txt}",
+                        pnl_line,
+                        stages_line,
+                    ]
+                    lines.extend(card)
+
                 await self._tg(
                     "sendMessage", chat_id=self._chat_id, text="\n".join(lines), parse_mode="HTML",
                 )
@@ -631,21 +910,94 @@ class InteractiveTelegramBot:
                     close = getattr(repo, "close", None)
                     if close:
                         await close()
-                # v0.4.12.1 hotfix: get_todays_pnl() returns net_pnl/gross_pnl
-                # — it has NO realized_pnl/unrealized_pnl keys, so the old
-                # .get() chain always printed ₹0.00/₹0.00. compute_pnl_view()
-                # maps realized from net_pnl and computes direction-aware
-                # unrealized MTM from open positions' current_price.
-                view = compute_pnl_view(pnl, open_positions)
+                if not open_positions and hasattr(self.engine, "positions") and self.engine.positions:
+                    open_positions = list(self.engine.positions.values())
+
+                feed = getattr(self.engine, "feed", None) or getattr(self.engine, "feed_manager", None)
+                live_prices: Dict[str, float] = {}
+                for p in open_positions or []:
+                    sym = getattr(p, "symbol", "")
+                    if sym and feed and hasattr(feed, "get_ltp"):
+                        try:
+                            px = await feed.get_ltp(sym)
+                            if px and px > 0:
+                                live_prices[str(sym).upper()] = float(px)
+                        except Exception:
+                            pass
+
+                view = compute_pnl_view(pnl, open_positions, live_prices=live_prices)
                 realized = view["realized"]
                 unrealized = view["unrealized"]
                 total = view["total"]
+                gross = float(pnl.get("gross_pnl", 0.0) or pnl.get("pnl", realized)) if pnl else 0.0
+                fees = float(pnl.get("total_fees", 0.0) or pnl.get("fees", 0.0)) if pnl else 0.0
+                win_rate = float(pnl.get("win_rate", 0.0) or 0.0) if pnl else 0.0
+                net_win_rate = float(pnl.get("net_win_rate", 0.0) or 0.0) if pnl else 0.0
+                closed_count = pnl.get("closed_trades", pnl.get("total_trades", 0)) if pnl else 0
+                closed_txt = f" ({closed_count} closed trades)" if closed_count else " (0 closed trades)"
+                gross_emoji = "🟢" if gross >= 0 else "🔴"
+                net_emoji = "🟢" if realized >= 0 else "🔴"
+                tot_emoji = "🟢" if total >= 0 else "🔴"
                 lines = [
-                    f"💰 <b>Today's P&amp;L</b> · {datetime.now(IST).strftime('%d %b %H:%M')}",
-                    f"Realized: <b>{_fmt_money(realized)}</b>",
-                    f"Unrealized: <b>{_fmt_money(unrealized)}</b>",
-                    f"Total: <b>{_fmt_money(total)}</b>",
+                    f"💰 <b>Today's P&amp;L Breakdown</b> · {datetime.now(IST).strftime('%d %b %H:%M')}",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"📊 Gross P&amp;L: {gross_emoji} <b>{_fmt_money(gross)}</b> (Strategy WR: {win_rate:.0f}%)",
+                    f"🧾 Total Fees: <b>{_fmt_money(-fees)}</b> <i>(Brokerage &amp; Taxes)</i>",
+                    f"💵 Net Realized: {net_emoji} <b>{_fmt_money(realized)}</b>{closed_txt} (Net WR: {net_win_rate:.0f}%)",
+                    f"📈 Unrealized MTM: <b>{_fmt_money(unrealized)}</b>",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    f"🏁 Net Total: {tot_emoji} <b>{_fmt_money(total)}</b>",
                 ]
+                await self._tg(
+                    "sendMessage", chat_id=self._chat_id, text="\n".join(lines), parse_mode="HTML",
+                )
+            elif cmd in ("/fees", "/fees_summary"):
+                if self.repo_getter is None:
+                    await self._tg("sendMessage", chat_id=self._chat_id, text="⚠️ DB not available.")
+                    return
+                repo = await self.repo_getter()
+                try:
+                    summary = await repo.get_multi_timeframe_fee_summary() or {}
+                finally:
+                    close = getattr(repo, "close", None)
+                    if close:
+                        await close()
+
+                lines = [
+                    f"🧾 <b>Institutional Fee Awareness Audit</b> · {datetime.now(IST).strftime('%d %b %H:%M')}",
+                    "<i>Brokerage, STT, GST, Exchange & Stamp Duty Breakdown</i>",
+                    "━━━━━━━━━━━━━━━━━━━━━━━━",
+                ]
+
+                tf_labels = [
+                    ("today", "📅 Today"),
+                    ("week", "🗓 This Week"),
+                    ("month", "📆 This Month"),
+                    ("year", "📈 This Year"),
+                    ("overall", "🌐 Overall (All-Time)"),
+                ]
+
+                for key, display_label in tf_labels:
+                    b = summary.get(key, {})
+                    cnt = b.get("total_trades", 0)
+                    gross = b.get("gross_pnl", 0.0)
+                    fees = b.get("total_fees", 0.0)
+                    net = b.get("net_pnl", 0.0)
+                    g_wr = b.get("gross_win_rate", 0.0)
+                    n_wr = b.get("net_win_rate", 0.0)
+                    drag = b.get("fee_drag_pct", 0.0)
+                    avg_fee = b.get("avg_trade_fee", 0.0)
+
+                    net_emoji = "🟢" if net >= 0 else "🔴"
+                    gross_emoji = "🟢" if gross >= 0 else "🔴"
+
+                    lines.append(f"<b>{display_label}</b> ({cnt} trades):")
+                    lines.append(f"  ├ Gross: {gross_emoji} {_fmt_money(gross)} (Strat WR: {g_wr:.0f}%)")
+                    lines.append(f"  ├ Fees: <b>{_fmt_money(-fees)}</b> (Avg/Trade: ₹{avg_fee:.1f})")
+                    lines.append(f"  └ Net: {net_emoji} <b>{_fmt_money(net)}</b> (Net WR: {n_wr:.0f}% · Drag: {drag:.1f}%)")
+                    lines.append("")
+
+                lines.append("<i>Note: Strategy WR is gross price predictive accuracy decoupled from fee drag.</i>")
                 await self._tg(
                     "sendMessage", chat_id=self._chat_id, text="\n".join(lines), parse_mode="HTML",
                 )
@@ -702,70 +1054,93 @@ class InteractiveTelegramBot:
 
     async def poll_loop(self) -> None:
         """Long-poll getUpdates and dispatch messages/callbacks. Never raises."""
-        consecutive_errors = 0
-        while not self._stopping:
-            # v0.4.21 heartbeat: refreshed at the TOP of every cycle (after
-            # each long-poll return), surfaced via poll_stalled_seconds().
-            self._poll_beat = time.monotonic()
+        acquired, holder_pid = self._poll_lock.acquire()
+        if not acquired:
+            self._poller_disabled = True
+            pid_str = str(holder_pid) if holder_pid else "unknown"
+            logger.warning(
+                "Another Telegram interactive poller is running (PID %s). Disabling this poller instance.",
+                pid_str,
+            )
+            return
+
+        try:
+            # On startup (before first getUpdates), clear hanging poll sessions and conflicting webhooks
             try:
-                data = await self._tg(
-                    "getUpdates",
-                    offset=self._offset,
-                    timeout=self._poll_timeout,
-                    allowed_updates=["message", "callback_query"],
-                )
-                if data is None:
-                    consecutive_errors += 1
-                    if consecutive_errors % 20 == 0:
-                        logger.critical(
-                            "poll_loop: %d consecutive failed getUpdates calls — "
-                            "bot effectively deaf (token/network?)",
-                            consecutive_errors,
-                        )
-                    await asyncio.sleep(min(5 * consecutive_errors, 30))
-                    continue
-                consecutive_errors = 0
-                if not data.get("ok"):
-                    await asyncio.sleep(3)
-                    continue
-                for update in data.get("result", []):
-                    self._offset = max(self._offset, update.get("update_id", 0) + 1)
-                    if "callback_query" in update:
-                        # v0.4.21: bounded dispatch — a hung handler (DB/HTTP
-                        # wedge) used to freeze ALL subsequent messages forever
-                        # (the 11:16-IST silence). Timeout cancels the handler;
-                        # Repository.close() is shielded so its session still
-                        # returns to the pool cleanly.
-                        try:
-                            await asyncio.wait_for(
-                                self._handle_callback(update["callback_query"]),
-                                timeout=_HANDLER_TIMEOUT_S,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                "callback handler timed out after %ss — update skipped",
-                                _HANDLER_TIMEOUT_S,
-                            )
-                    elif "message" in update:
-                        msg = update["message"]
-                        if self._authorized((msg.get("chat") or {}).get("id")):
-                            text = msg.get("text", "")
-                            if text.startswith("/"):
-                                try:
-                                    await asyncio.wait_for(
-                                        self._handle_command(text),
-                                        timeout=_HANDLER_TIMEOUT_S,
-                                    )
-                                except asyncio.TimeoutError:
-                                    logger.error(
-                                        "command '%s' timed out after %ss",
-                                        text.split()[0], _HANDLER_TIMEOUT_S,
-                                    )
-            except asyncio.CancelledError:
-                return
+                await self._tg("deleteWebhook", drop_pending_updates=True)
             except Exception as exc:
-                logger.error("poll_loop cycle failed: %s", exc, exc_info=True)
-                await asyncio.sleep(10)
+                logger.warning("Telegram deleteWebhook on startup failed: %s", exc)
+
+            consecutive_errors = 0
+            while not self._stopping:
+                # v0.4.21 heartbeat: refreshed at the TOP of every cycle (after
+                # each long-poll return), surfaced via poll_stalled_seconds().
+                self._poll_beat = time.monotonic()
+                try:
+                    data = await self._tg(
+                        "getUpdates",
+                        offset=self._offset,
+                        timeout=self._poll_timeout,
+                        allowed_updates=["message", "callback_query"],
+                    )
+                    if data is None:
+                        consecutive_errors += 1
+                        if consecutive_errors % 20 == 0:
+                            logger.critical(
+                                "poll_loop: %d consecutive failed getUpdates calls — "
+                                "bot effectively deaf (token/network?)",
+                                consecutive_errors,
+                            )
+                        await asyncio.sleep(min(5 * consecutive_errors, 30))
+                        continue
+                    consecutive_errors = 0
+                    if not data.get("ok"):
+                        if data.get("error_code") == 409 or "conflict" in str(data.get("description", "")).lower():
+                            logger.warning("Telegram poll conflict detected (another instance active?), backing off 5s")
+                            await asyncio.sleep(5)
+                        else:
+                            await asyncio.sleep(3)
+                        continue
+                    for update in data.get("result", []):
+                        self._offset = max(self._offset, update.get("update_id", 0) + 1)
+                        if "callback_query" in update:
+                            # v0.4.21: bounded dispatch — a hung handler (DB/HTTP
+                            # wedge) used to freeze ALL subsequent messages forever
+                            # (the 11:16-IST silence). Timeout cancels the handler;
+                            # Repository.close() is shielded so its session still
+                            # returns to the pool cleanly.
+                            try:
+                                await asyncio.wait_for(
+                                    self._handle_callback(update["callback_query"]),
+                                    timeout=_HANDLER_TIMEOUT_S,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.error(
+                                    "callback handler timed out after %ss — update skipped",
+                                    _HANDLER_TIMEOUT_S,
+                                )
+                        elif "message" in update:
+                            msg = update["message"]
+                            if self._authorized((msg.get("chat") or {}).get("id")):
+                                text = msg.get("text", "")
+                                if text.startswith("/"):
+                                    try:
+                                        await asyncio.wait_for(
+                                            self._handle_command(text),
+                                            timeout=_HANDLER_TIMEOUT_S,
+                                        )
+                                    except asyncio.TimeoutError:
+                                        logger.error(
+                                            "command '%s' timed out after %ss",
+                                            text.split()[0], _HANDLER_TIMEOUT_S,
+                                        )
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.error("poll_loop cycle failed: %s", exc, exc_info=True)
+                    await asyncio.sleep(10)
+        finally:
+            self._poll_lock.release()
 
     async def canary_loop(self) -> None:
         """Blind-spot canary: engine down during market hours → Telegram alert."""
@@ -851,6 +1226,7 @@ class InteractiveTelegramBot:
             except (asyncio.CancelledError, Exception):
                 pass
         self._tasks.clear()
+        self._poll_lock.release()
 
     # ------------------------------------------------------------------
     # Evidence export (for v0.4.10 acceptance pack)

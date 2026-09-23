@@ -32,7 +32,7 @@ risk:
   max_open_positions: 10
   max_per_sector: 2
   max_sector_concentration_pct: 40.0
-  max_daily_trades: 10
+  max_daily_trades: 20
   max_daily_loss_pct: 3.0
   max_consecutive_losses: 5
   consec_loss_cooloff_minutes: 30
@@ -62,8 +62,10 @@ risk:
   banknifty_sanity_min: 25000
   banknifty_sanity_max: 100000
   max_fee_pct_of_risk: 30.0
-  g19_mode: log_only
-  min_move_fee_multiple: 2.0
+  g19_mode: enforce
+  min_move_fee_multiple: 2.5
+  g21_mode: enforce
+  ml_veto_threshold: 0.40
   hard_risk_pct: 1.0
   per_strategy_daily_loss_pct: 1.0
   per_strategy_daily_loss_overrides:
@@ -107,6 +109,8 @@ strategy_shadow_mode:
 - Supertrend
 - TrendExhaustion
 - VWAPReversion
+- VR
+- BBR
 paper_broker:
   slippage:
     enabled: true
@@ -116,6 +120,7 @@ paper_broker:
 partial_booking:
   enabled: true
   brokerage_buffer_pct: 0.05
+  min_s1_trigger_pct: 0.35
   stage1_trigger_pct: 0.5
   stage1_book_pct: 0.0
   stage2_trigger_pct: 1.0
@@ -130,7 +135,8 @@ partial_booking:
   trailing_sl_method: step
   trailing_step_pct: 0.5
 position_sizing:
-  method: dynamic_kelly
+  method: risk_based
+  min_sl_pct: 0.5
   kelly_min_fraction: 0.02
   kelly_max_fraction: 0.08
   hard_risk_pct: 1.0
@@ -277,11 +283,15 @@ strategy_activation:
     - PTC
     - MB
     - TRS
+    - VR
+    - BBR
     weights:
       ORB: 1.2
       MRF: 1.2
       VC: 1.1
       SIC: 1.0
+      VR: 0.0
+      BBR: 0.0
       PTC: 0.0
       MB: 0.0
       TRS: 0.0

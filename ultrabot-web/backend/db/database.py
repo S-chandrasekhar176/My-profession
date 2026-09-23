@@ -57,21 +57,20 @@ async def init_db() -> None:
     # v0.4.12: create_all never alters EXISTING tables — a live v0.4.11
     # database needs the feature columns added explicitly (idempotent,
     # nullable-only, preserves every existing row).
-    from db.migrations import ensure_shadow_feature_columns
+    import asyncio
+    import logging
+    from db.migrations import ensure_shadow_feature_columns, ensure_option_snapshots_indices
 
     try:
-        added = ensure_shadow_feature_columns(str(DB_PATH))
+        added = await asyncio.to_thread(ensure_shadow_feature_columns, str(DB_PATH))
         if added:
-            import logging
-
             logging.getLogger(__name__).info(
                 "shadow_outcomes migration: added columns %s", added
             )
+        await asyncio.to_thread(ensure_option_snapshots_indices, str(DB_PATH))
     except Exception:
-        import logging
-
         logging.getLogger(__name__).warning(
-            "shadow_outcomes feature-column migration failed", exc_info=True
+            "database schema migration failed", exc_info=True
         )
 
 

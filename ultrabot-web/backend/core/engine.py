@@ -38,6 +38,8 @@ from shadow.shadow_utils import (
     update_excursion,
 )
 from core.capital_resolver import resolve_total_capital
+from core.event_bus import EventBus, EventPriority
+from feeds.tick_bar_aggregator import TickBarAggregator
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -272,6 +274,17 @@ class UltraBotEngine:
         self._shadow_feature_snapshot_enabled: bool = bool(
             _risk_cfg_init.get("shadow_feature_snapshot_enabled", True)
         )
+
+        # Phase 1: Real-time streaming & event engine
+        self.event_bus: EventBus = EventBus()
+        self.aggregator: Optional[TickBarAggregator] = getattr(self.feed_manager, "aggregator", None)
+        if self.aggregator is None:
+            self.aggregator = TickBarAggregator()
+            if hasattr(self.feed_manager, "aggregator"):
+                self.feed_manager.aggregator = self.aggregator
+        # In-memory position cache for microsecond tick monitoring (prevents per-tick DB queries)
+        self._active_position_cache: Dict[str, List[Dict[str, Any]]] = {}
+
     @asynccontextmanager
     async def _repo_context(self):
         """Context manager yielding repository and ensuring session cleanup."""
@@ -491,6 +504,17 @@ class UltraBotEngine:
                         # recovered session capital (broker was created before
                         # recovery could adjust self.initial_capital).
                         self._sync_paper_broker_capital()
+                        # Self-healing carry-forward must ALSO run on the
+                        # same-day resume path: the restored session capital
+                        # may have drifted from the trades-ledger truth
+                        # (re-anchored / corrected ledger rows mid-day).
+                        if self.mode == "paper":
+                            await self._reconcile_boot_capital_with_ledger()
+                            # Re-align the broker ledger with the reconciled
+                            # capital (the sync above ran pre-reconciliation;
+                            # without this the PaperBroker cash would keep the
+                            # drifted value — the classic two-ledger drift).
+                            self._sync_paper_broker_capital()
                     logger.info(
                         "Resumed same-day session %s: regime=%s, vix=%.1f, starting_capital=%.2f",
                         self.session_id, self.current_regime, self.vix, self.initial_capital,
@@ -517,6 +541,7 @@ class UltraBotEngine:
                         async with self._repo_context() as repo:
                             if repo is not None and hasattr(repo, "get_open_positions"):
                                 _open_rows = await repo.get_open_positions()
+                                self._rebuild_active_position_cache(_open_rows or [])
                                 _rows = [
                                     {
                                         "id": getattr(r, "id", None),
@@ -632,6 +657,13 @@ class UltraBotEngine:
                             self.initial_capital = resolve_total_capital(config=self.config)
                     else:
                         self.initial_capital = resolve_total_capital(config=self.config)
+
+                # Paper mode capital reconciliation: anchor boot capital to
+                # trades ledger truth (logic extracted to
+                # _reconcile_boot_capital_with_ledger so the same-day resume
+                # path runs the identical check).
+                if will_run_paper:
+                    await self._reconcile_boot_capital_with_ledger()
 
                 # Sync paper broker's internal capital whenever the factory
                 # resolved to PaperBroker (mode=paper OR paper-mapped name).
@@ -795,8 +827,16 @@ class UltraBotEngine:
                 "state": "running",
                 "mode": mode,
                 "broker": broker_name,
+                "capital": self.initial_capital,
                 "details": f"Session {self.session_id[:8]} started with {len(self.active_strategies)} active strategies ({self.current_regime} regime)",
             })
+
+            # Phase 1: Start EventBus and wire continuous tick monitoring
+            if hasattr(self, "event_bus") and self.event_bus:
+                self.event_bus.start()
+                self.event_bus.subscribe("tick.quote", self._handle_tick_position_monitor)
+            if hasattr(self, "aggregator") and self.aggregator:
+                self.aggregator.register_tick_listener(self._on_tick_update)
 
             # Start main loop as background task
             self._main_task = asyncio.create_task(self._main_loop())
@@ -901,6 +941,13 @@ class UltraBotEngine:
                 except Exception as exc:
                     logger.warning("Error during feed disconnect: %s", exc)
                 self.feed = None
+
+            # Phase 1: Stop EventBus
+            if hasattr(self, "event_bus") and self.event_bus:
+                try:
+                    await self.event_bus.stop()
+                except Exception as exc:
+                    logger.warning("Error stopping event bus: %s", exc)
 
             # Close session
             if self.session_id:
@@ -1571,6 +1618,8 @@ class UltraBotEngine:
                         context={"action": "scan_symbol", "symbol": symbol},
                         session_id=self.session_id,
                     )
+                finally:
+                    await asyncio.sleep(0.15)
 
             # Broadcast telemetry update to WebSocket subscribers
             try:
@@ -2279,6 +2328,44 @@ class UltraBotEngine:
                     signal, strategy_name, symbol, current_price, sizing, risk_result, signal_id=sig_id
                 )
 
+                # Gate G21 ML Veto Check (enforce mode)
+                risk_cfg = self.config.get("risk", {}) if hasattr(self, "config") and isinstance(self.config, dict) else {}
+                g21_mode = str(risk_cfg.get("g21_mode", "enforce")).lower()
+                if g21_mode == "enforce" and opportunity.get("ml_action") == "VETO":
+                    veto_prob = opportunity.get("ml_win_probability")
+                    if veto_prob is None:
+                        veto_prob = (opportunity.get("ml_score") or 0.0) * 100.0
+                    threshold_pct = float(risk_cfg.get("ml_veto_threshold", 0.40)) * 100.0
+                    veto_reason = f"M3a ML model VETO: win probability {veto_prob:.1f}% < {threshold_pct:.0f}%"
+                    logger.info(
+                        "Signal %s/%s rejected by Gate G21_ML_Veto: %s",
+                        strategy_name, symbol, veto_reason,
+                    )
+                    if self._signals_passed_count > 0:
+                        self._signals_passed_count -= 1
+                    self._signals_rejected_count += 1
+                    self._rejections_by_gate["G21_ML_Veto"] = (
+                        self._rejections_by_gate.get("G21_ML_Veto", 0) + 1
+                    )
+                    self._rejections_by_strategy[strategy_name] = (
+                        self._rejections_by_strategy.get(strategy_name, 0) + 1
+                    )
+                    self._record_telemetry_event(
+                        symbol=symbol,
+                        strategy=strategy_name,
+                        status="REJECTED",
+                        direction=signal.get("direction", "—"),
+                        price=current_price,
+                        confidence=float(signal.get("confidence", 0.0)),
+                        gate="G21_ML_Veto",
+                        reason=veto_reason,
+                    )
+                    try:
+                        await repo.update_signal(sig_id, status="rejected", reason=veto_reason)
+                    except Exception:
+                        pass
+                    continue
+
                 # Store in pending
                 opp_id = opportunity["id"]
                 async with self._opportunities_lock:
@@ -2405,8 +2492,38 @@ class UltraBotEngine:
                 try:
                     from shadow.features import compute_feature_snapshot
 
+                    # Retrieve market / options context for v1.1 snapshot (Task 2)
+                    vix_val = getattr(self, "vix", None)
+                    if vix_val is None:
+                        vix_val = vix
+
+                    pcr_val = None
+                    ivr_val = None
+                    opt_rec = getattr(self, "option_recorder", None)
+                    if not opt_rec:
+                        try:
+                            import sys
+                            app_mod = sys.modules.get("app")
+                            if app_mod and hasattr(app_mod, "app") and hasattr(app_mod.app, "state"):
+                                opt_rec = getattr(app_mod.app.state, "option_recorder", None)
+                        except Exception:
+                            opt_rec = None
+
+                    if opt_rec and hasattr(opt_rec, "get_latest_metrics"):
+                        metrics_opt = opt_rec.get_latest_metrics(symbol)
+                        if isinstance(metrics_opt, dict) and not metrics_opt.get("stale", True):
+                            pcr_val = metrics_opt.get("pcr")
+                            ivr_val = metrics_opt.get("iv_rank")
+                    elif hasattr(self, "current_pcr") and self.current_pcr is not None:
+                        pcr_val = self.current_pcr
+                        ivr_val = getattr(self, "current_iv_rank", None)
+
                     features_snapshot = compute_feature_snapshot(
-                        df_candles, now=datetime.now(IST)
+                        df_candles,
+                        now=datetime.now(IST),
+                        vix=vix_val,
+                        pcr=pcr_val,
+                        iv_rank=ivr_val,
                     )
                 except Exception:
                     features_snapshot = None
@@ -2432,6 +2549,7 @@ class UltraBotEngine:
                     # v0.4.12: ride the point-in-time snapshot on the signal
                     # dict — _register_shadow copies it into the dataset.
                     res.setdefault("features_snapshot", features_snapshot)
+                res["candles_df"] = df_candles
                 return res
         except Exception as scan_err:
             logger.warning("Strategy %s scan exception on %s: %s", strategy_name, symbol, scan_err, exc_info=True)
@@ -3608,6 +3726,44 @@ class UltraBotEngine:
         except Exception:
             estimated_costs = None
 
+        # Phase P4: ML Shadow Advisor (Gate G21 advisory)
+        ml_eval = None
+        try:
+            from ml.inference import get_inference_engine
+            ml_engine = get_inference_engine()
+
+            # Dynamic PCR and IV Rank from OptionChainRecorder (eliminates train/serve skew)
+            pcr_val = 1.0
+            ivr_val = 50.0
+            opt_rec = getattr(self, "option_recorder", None)
+            if not opt_rec:
+                try:
+                    import sys
+                    app_mod = sys.modules.get("app")
+                    if app_mod and hasattr(app_mod, "app") and hasattr(app_mod.app, "state"):
+                        opt_rec = getattr(app_mod.app.state, "option_recorder", None)
+                except Exception:
+                    pass
+
+            if opt_rec and hasattr(opt_rec, "get_latest_metrics"):
+                metrics_opt = opt_rec.get_latest_metrics(symbol)
+                pcr_val = metrics_opt.get("pcr", 1.0)
+                ivr_val = metrics_opt.get("iv_rank", 50.0)
+            elif hasattr(self, "current_pcr") and self.current_pcr is not None:
+                pcr_val = float(self.current_pcr)
+                ivr_val = float(getattr(self, "current_iv_rank", 50.0) or 50.0)
+
+            ml_eval = ml_engine.score_signal(
+                signal=signal,
+                candles_df=signal.get("candles_df"),
+                vix=float(self.vix or 15.0),
+                regime=str(self.current_regime or "sideways"),
+                pcr=float(pcr_val),
+                iv_rank=float(ivr_val),
+            )
+        except Exception as ml_err:
+            logger.debug("ML advisory scoring failed: %s", ml_err)
+
         return {
             "id": opportunity_id,
             "signal_id": resolved_signal_id,
@@ -3666,6 +3822,10 @@ class UltraBotEngine:
             "win_rate": signal.get("win_rate"),
             "avg_rr": signal.get("avg_rr"),
             "notes": risk_result.get("notes", ""),
+            "ml_score": ml_eval.get("score") if ml_eval else None,
+            "ml_action": ml_eval.get("action") if ml_eval else None,
+            "ml_win_probability": ml_eval.get("win_probability") if ml_eval else None,
+            "ml_eval": ml_eval,
         }
 
     # ------------------------------------------------------------------
@@ -4164,7 +4324,7 @@ class UltraBotEngine:
             }
             position_extra.update(option_metadata)
 
-            await repo.create_position(
+            _new_pos = await repo.create_position(
                 trade_id=trade_id,
                 symbol=trade_symbol,
                 direction=trade_direction,
@@ -4184,6 +4344,8 @@ class UltraBotEngine:
                 session_id=self.session_id,
                 extra=position_extra,
             )
+            if _new_pos:
+                self._sync_position_to_cache(_new_pos)
 
             # v0.4.16 (user-testing feedback 2026-09-08): the DB signal row
             # stayed 'pending' after a successful fill — on the next engine
@@ -4302,10 +4464,161 @@ class UltraBotEngine:
     # Position Management
     # ------------------------------------------------------------------
 
+    def _on_tick_update(self, symbol: str, price: float, ts: float) -> None:
+        """Immediate synchronous tick listener from aggregator (Phase 1 fast path)."""
+        if not hasattr(self, "event_bus") or not self.event_bus or not self.event_bus._running or self.state != EngineState.RUNNING:
+            return
+        self.event_bus.publish_nowait(
+            "tick.quote",
+            {"symbol": symbol, "price": price, "timestamp": ts},
+            priority=EventPriority.HIGH,
+        )
+
+    def _rebuild_active_position_cache(self, positions: List[Any]) -> None:
+        """Rebuild the in-memory active position cache from a list of Position objects."""
+        new_cache: Dict[str, List[Dict[str, Any]]] = {}
+        for pos in (positions or []):
+            sym = str(getattr(pos, "symbol", "") or "").upper()
+            if not sym:
+                continue
+            if sym not in new_cache:
+                new_cache[sym] = []
+            new_cache[sym].append({
+                "id": getattr(pos, "id", None),
+                "symbol": sym,
+                "direction": getattr(pos, "direction", "BUY"),
+                "entry_price": float(getattr(pos, "entry_price", 0.0) or 0.0),
+                "current_price": float(getattr(pos, "current_price", 0.0) or getattr(pos, "entry_price", 0.0) or 0.0),
+                "quantity": int(getattr(pos, "quantity", 0) or 0),
+                "stop_loss": float(getattr(pos, "stop_loss", 0.0) or getattr(pos, "sl_price", 0.0) or 0.0),
+                "target": float(getattr(pos, "target", 0.0) or getattr(pos, "target_price", 0.0) or 0.0),
+                "trailing_stop": float(getattr(pos, "trailing_stop", 0.0) or 0.0),
+                "status": "OPEN",
+            })
+        self._active_position_cache = new_cache
+
+    def _sync_position_to_cache(self, position: Any) -> None:
+        """Add or update an open position in the in-memory cache."""
+        sym = str(getattr(position, "symbol", "") or "").upper()
+        pos_id = getattr(position, "id", None)
+        if not sym or not pos_id:
+            return
+        if sym not in self._active_position_cache:
+            self._active_position_cache[sym] = []
+        for existing in self._active_position_cache[sym]:
+            if existing.get("id") == pos_id:
+                existing.update({
+                    "direction": getattr(position, "direction", existing.get("direction")),
+                    "entry_price": float(getattr(position, "entry_price", existing.get("entry_price", 0.0)) or 0.0),
+                    "current_price": float(getattr(position, "current_price", existing.get("current_price", 0.0)) or 0.0),
+                    "quantity": int(getattr(position, "quantity", existing.get("quantity", 0)) or 0),
+                    "stop_loss": float(getattr(position, "stop_loss", 0.0) or getattr(position, "sl_price", 0.0) or 0.0),
+                    "target": float(getattr(position, "target", 0.0) or getattr(position, "target_price", 0.0) or 0.0),
+                    "trailing_stop": float(getattr(position, "trailing_stop", 0.0) or 0.0),
+                })
+                return
+        self._active_position_cache[sym].append({
+            "id": pos_id,
+            "symbol": sym,
+            "direction": getattr(position, "direction", "BUY"),
+            "entry_price": float(getattr(position, "entry_price", 0.0) or 0.0),
+            "current_price": float(getattr(position, "current_price", 0.0) or getattr(position, "entry_price", 0.0) or 0.0),
+            "quantity": int(getattr(position, "quantity", 0) or 0),
+            "stop_loss": float(getattr(position, "stop_loss", 0.0) or getattr(position, "sl_price", 0.0) or 0.0),
+            "target": float(getattr(position, "target", 0.0) or getattr(position, "target_price", 0.0) or 0.0),
+            "trailing_stop": float(getattr(position, "trailing_stop", 0.0) or 0.0),
+            "status": "OPEN",
+        })
+
+    def _remove_position_from_cache(self, position_id: Any, symbol: Optional[str] = None) -> None:
+        """Remove a closed position from the in-memory cache."""
+        if symbol:
+            sym = str(symbol).upper()
+            if sym in self._active_position_cache:
+                self._active_position_cache[sym] = [
+                    p for p in self._active_position_cache[sym] if p.get("id") != position_id
+                ]
+                if not self._active_position_cache[sym]:
+                    del self._active_position_cache[sym]
+                return
+        for sym_key in list(self._active_position_cache.keys()):
+            self._active_position_cache[sym_key] = [
+                p for p in self._active_position_cache[sym_key] if p.get("id") != position_id
+            ]
+            if not self._active_position_cache[sym_key]:
+                del self._active_position_cache[sym_key]
+
+    async def _handle_tick_position_monitor(self, event_name: str, payload: Dict[str, Any]) -> None:
+        """High-priority tick evaluator for open positions (sub-millisecond SL/target exit).
+        
+        Evaluates pure in-memory cache in microseconds without touching DB.
+        Only when an actual SL or target breach is detected does it open a DB session to execute exit.
+        """
+        symbol = payload.get("symbol")
+        price = payload.get("price")
+        if not symbol or price is None or self.state != EngineState.RUNNING:
+            return
+
+        sym_upper = str(symbol).upper()
+        cached_positions = self._active_position_cache.get(sym_upper)
+        if not cached_positions:
+            return
+
+        try:
+            price_val = float(price)
+        except (ValueError, TypeError):
+            return
+
+        # Check if ANY cached position for this symbol has a potential breach
+        breach_detected = False
+        for pos_data in cached_positions:
+            sl = float(pos_data.get("stop_loss") or pos_data.get("sl_price") or 0.0)
+            target = float(pos_data.get("target") or pos_data.get("target_price") or 0.0)
+            direction = str(pos_data.get("direction", "BUY")).upper()
+            is_long = _is_long_direction(direction)
+
+            # Check Stop Loss breach
+            if sl > 0:
+                if is_long and price_val <= sl:
+                    breach_detected = True
+                    break
+                elif not is_long and price_val >= sl:
+                    breach_detected = True
+                    break
+
+            # Check Target breach
+            if target > 0:
+                if is_long and price_val >= target:
+                    breach_detected = True
+                    break
+                elif not is_long and price_val <= target:
+                    breach_detected = True
+                    break
+
+            # Update cached current price in RAM
+            pos_data["current_price"] = price_val
+
+        if not breach_detected:
+            # Price within normal bounds — pure RAM return, zero DB overhead!
+            return
+
+        # Price breached SL or Target: open DB context and execute exit
+        try:
+            async with self._repo_context() as repo:
+                if repo is None:
+                    return
+                positions = await repo.get_open_positions()
+                for pos in positions:
+                    if getattr(pos, "symbol", "").upper() == sym_upper:
+                        await self._manage_position(pos, repo=repo)
+        except Exception as e:
+            logger.debug("Error in tick position monitor breach handler for %s: %s", symbol, e)
+
     async def _manage_all_positions(self) -> None:
         """Manage all open positions: update prices, check SL/target/partial bookings."""
         async with self._repo_context() as repo:
             positions = await repo.get_open_positions()
+            self._rebuild_active_position_cache(positions or [])
 
             for position in positions:
                 try:
@@ -4602,6 +4915,20 @@ class UltraBotEngine:
         extra_data["partial_fees"] = round(
             float(extra_data.get("partial_fees", 0.0) or 0.0) + partial_fees, 2
         )
+        stage_details = extra_data.get("stage_details") or {}
+        if not isinstance(stage_details, dict):
+            stage_details = {}
+        stage_details[str(level)] = {
+            "pnl": net_partial_pnl,
+            "qty": int(book_qty),
+            "price": round(current_price, 2),
+        }
+        extra_data["stage_details"] = stage_details
+        extra_data["booked_qty"] = int(extra_data.get("booked_qty", 0) or 0) + int(book_qty)
+        if booking_data.get("stages_fired"):
+            extra_data["stages_fired"] = booking_data.get("stages_fired")
+        elif hasattr(position, "stages_fired") and getattr(position, "stages_fired"):
+            extra_data["stages_fired"] = getattr(position, "stages_fired")
 
         async with self._repo_context() as repo:
             await repo.update_position(
@@ -4905,8 +5232,10 @@ class UltraBotEngine:
                 # daily-risk tracker as they happened (record_pnl inside
                 # _execute_partial_booking). net_pnl now includes those
                 # legs, so record ONLY the final leg here — passing net_pnl
-                # would double-count every partial booking.
-                self.daily_risk.record_trade_result(pnl=round(pnl_amount - exit_fees, 2))
+                self.daily_risk.record_trade_result(
+                    pnl=round(pnl_amount - exit_fees, 2),
+                    gross_pnl=round(_round_trip_gross, 2),
+                )
                 daily_status = self.daily_risk.check_daily_limits()
                 if daily_status and not getattr(daily_status, "can_trade", True):
                     await self._route_alert("risk_event", {
@@ -4986,6 +5315,7 @@ class UltraBotEngine:
             position.direction, position.symbol, position.quantity,
             position.entry_price, exit_price, pnl_amount, net_pnl, close_reason,
         )
+        self._remove_position_from_cache(getattr(position, "id", None), getattr(position, "symbol", None))
 
     # ------------------------------------------------------------------
     # Market Context
@@ -5388,16 +5718,26 @@ class UltraBotEngine:
 
         # Get daily P&L
         pnl_data = {"net_pnl": 0, "total_trades": 0, "wins": 0, "losses": 0}
+        open_positions = []
         try:
             async with self._repo_context() as repo:
                 pnl_data = await repo.get_todays_pnl()
+                if repo is not None and hasattr(repo, "get_open_positions"):
+                    open_positions = await repo.get_open_positions() or []
         except Exception:
             pass
 
         # Get risk status
         risk_summary = {}
         try:
-            risk_status = await self.daily_risk.get_daily_risk_status()
+            capital_in_use = sum(
+                float(getattr(p, "invested_amount", None) or (float(getattr(p, "entry_price", 0.0) or 0.0) * float(getattr(p, "remaining_qty", getattr(p, "quantity", 0)) or 0)))
+                for p in open_positions
+            )
+            risk_status = await self.daily_risk.get_daily_risk_status(
+                open_positions_count=len(open_positions),
+                capital_in_use=capital_in_use,
+            )
             if hasattr(risk_status, "model_dump"):
                 risk_summary = risk_status.model_dump()
             elif isinstance(risk_status, dict):
@@ -5589,10 +5929,25 @@ class UltraBotEngine:
                 "exit_time": t.exit_time,
             })
 
+            # Multi-timeframe / all-time stats
+            all_time_pnl = {}
+            try:
+                fee_summary = await repo.get_multi_timeframe_fee_summary()
+                all_time_pnl = fee_summary.get("overall", {})
+            except Exception:
+                all_time_pnl = {}
+
         # Risk state
         risk_state = {}
         try:
-            risk_status = await self.daily_risk.get_daily_risk_status()
+            capital_in_use = sum(
+                float(getattr(p, "invested_amount", None) or (float(getattr(p, "entry_price", 0.0) or 0.0) * float(getattr(p, "remaining_qty", getattr(p, "quantity", 0)) or 0)))
+                for p in open_positions
+            )
+            risk_status = await self.daily_risk.get_daily_risk_status(
+                open_positions_count=len(open_positions),
+                capital_in_use=capital_in_use,
+            )
             if hasattr(risk_status, "model_dump"):
                 risk_state = risk_status.model_dump()
             elif isinstance(risk_status, dict):
@@ -5652,6 +6007,7 @@ class UltraBotEngine:
                 "unrealized_pnl": round(total_unrealized_pnl, 2),
             },
             "daily_pnl": pnl_data,
+            "all_time_pnl": all_time_pnl,
             "risk": risk_state,
             "open_positions": positions_data,
             "open_position_count": len(open_positions),
@@ -5667,6 +6023,44 @@ class UltraBotEngine:
     # ------------------------------------------------------------------
     # Paper-broker capital alignment
     # ------------------------------------------------------------------
+
+    async def _reconcile_boot_capital_with_ledger(self) -> None:
+        """Anchor boot capital to trades-ledger truth (self-healing carry-forward).
+
+        Extracted from start()'s new-day path so the SAME reconciliation also
+        runs on the same-day resume path (mid-day restart): recover_state()
+        restores the session's stored initial_capital, but the all-time trades
+        ledger is the source of truth — if the resolved capital drifts from
+        base + SUM(net_pnl) by more than ₹1.00, the ledger value wins.
+
+        Fail-open: any error is logged as a warning and capital is left as-is.
+        """
+        try:
+            async with self._repo_context() as repo:
+                if repo is not None:
+                    trades_count = 0
+                    if hasattr(repo, "get_trade_count"):
+                        trades_count = await repo.get_trade_count()
+                    elif hasattr(repo, "_count"):
+                        from db.migrations import Trade
+                        trades_count = await repo._count(Trade)
+
+                    if trades_count > 0 and hasattr(repo, "get_all_time_realized_net"):
+                        expected = resolve_total_capital(config=self.config) + await repo.get_all_time_realized_net()
+                        if abs(self.initial_capital - expected) > 1.00:
+                            logger.warning(
+                                "Boot capital reconciliation: resolved ₹%.2f but trades ledger implies "
+                                "₹%.2f (drift ₹%.2f). Using ledger truth.",
+                                self.initial_capital,
+                                expected,
+                                self.initial_capital - expected,
+                            )
+                            self.initial_capital = expected
+        except Exception as rec_exc:
+            logger.warning(
+                "Could not reconcile boot capital with trades ledger: %s",
+                rec_exc,
+            )
 
     def _sync_paper_broker_capital(self) -> None:
         """Align the PaperBroker ledger with the engine's current capital.

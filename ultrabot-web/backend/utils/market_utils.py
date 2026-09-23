@@ -204,9 +204,26 @@ def get_sectors() -> Dict[str, List[str]]:
 # Public helpers
 # ────────────────────────────────────────────────────────────────
 
+def _canonical_symbol(symbol: str) -> str:
+    s = (symbol or "").strip().upper()
+    if s == "NAM":
+        return "NAM-INDIA"
+    return s
+
+
+_INDEX_LOT_SIZES: Dict[str, int] = {
+    "NIFTY": 75,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 65,
+    "MIDCPNIFTY": 120,
+    "SENSEX": 20,
+}
+
+
 def is_fno_stock(symbol: str) -> bool:
-    """Check if a symbol is part of the F&O universe."""
-    return symbol.upper() in _FNO_SYMBOLS
+    """Check if a symbol is part of the F&O universe (including major indices)."""
+    sym = _canonical_symbol(symbol)
+    return sym in _FNO_SYMBOLS or sym in _INDEX_LOT_SIZES
 
 
 def is_fno_tradeable(symbol: str) -> bool:
@@ -217,33 +234,36 @@ def is_fno_tradeable(symbol: str) -> bool:
     math (v0.5.0 gating) — use this, not is_fno_stock(), on any path that
     touches derivatives.
     """
-    sym = symbol.upper()
-    return sym in _FNO_SYMBOLS and sym not in _CASH_ONLY_SYMBOLS
+    sym = _canonical_symbol(symbol)
+    return (sym in _FNO_SYMBOLS or sym in _INDEX_LOT_SIZES) and sym not in _CASH_ONLY_SYMBOLS
 
 
 def is_cash_only(symbol: str) -> bool:
     """True when the symbol is an NSE cash listing with no F&O series yet."""
-    return symbol.upper() in _CASH_ONLY_SYMBOLS
+    return _canonical_symbol(symbol) in _CASH_ONLY_SYMBOLS
 
 
 def get_stock_sector(symbol: str) -> str:
     """Get the sector for a stock. Returns 'Unknown' if not found."""
-    return _SECTOR_MAP.get(symbol.upper(), "Unknown")
+    return _SECTOR_MAP.get(_canonical_symbol(symbol), "Unknown")
 
 
 def get_stock_industry(symbol: str) -> Optional[str]:
     """Get the finer-grained industry for a stock (v0.4.11). None if unknown."""
-    return _INDUSTRY_MAP.get(symbol.upper())
+    return _INDUSTRY_MAP.get(_canonical_symbol(symbol))
 
 
 def get_lot_size(symbol: str) -> int:
-    """Get the F&O lot size for a stock. Returns 1 if not found."""
-    return _LOT_SIZE_MAP.get(symbol.upper(), 1)
+    """Get the F&O lot size for a stock or index. Returns 1 if not found."""
+    sym = _canonical_symbol(symbol)
+    if sym in _INDEX_LOT_SIZES:
+        return _INDEX_LOT_SIZES[sym]
+    return _LOT_SIZE_MAP.get(sym, 1)
 
 
 def get_stock_info(symbol: str) -> Optional[Dict]:
     """Get full stock info dict for a symbol. Returns None if not found."""
-    return _SYMBOL_MAP.get(symbol.upper())
+    return _SYMBOL_MAP.get(_canonical_symbol(symbol))
 
 
 def get_symbols_by_sector(sector: str) -> List[str]:

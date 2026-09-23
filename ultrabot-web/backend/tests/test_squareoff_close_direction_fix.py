@@ -376,6 +376,7 @@ class TestDashboardFallbackDirection:
         )
         repo.get_todays_trades = AsyncMock(return_value=[])
         repo.get_watchlist_count = AsyncMock(return_value=0)
+        repo.get_multi_timeframe_fee_summary = AsyncMock(return_value={"overall": {}})
         data = await get_dashboard(username="u", engine=None, repo=repo)
         return data
 
@@ -425,12 +426,13 @@ class TestClosePositionCallSignatureBinding:
         valid_params = set(sig.parameters.keys()) - {"self"}
         offenders = []
 
-        for path in Path(".").rglob("*.py"):
+        backend_dir = Path(__file__).resolve().parent.parent
+        for path in backend_dir.rglob("*.py"):
             s = str(path)
-            if "venv" in s or s.startswith("tests/") or "node_modules" in s:
+            if "venv" in s or "tests" in s or "node_modules" in s:
                 continue
             try:
-                tree = ast.parse(path.read_text())
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
             except (OSError, SyntaxError):
                 continue
             for node in ast.walk(tree):
@@ -456,7 +458,9 @@ class TestClosePositionCallSignatureBinding:
         """Pin the exact historical bug: the engine-delegation call in
         trades.py must pass close_reason= (repo.update_trade's separate
         exit_reason= kwarg is a different, legitimate API)."""
-        tree = ast.parse(Path("api/routes/trades.py").read_text())
+        backend_dir = Path(__file__).resolve().parent.parent
+        trades_path = backend_dir / "api" / "routes" / "trades.py"
+        tree = ast.parse(trades_path.read_text(encoding="utf-8", errors="ignore"))
         engine_calls = [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)

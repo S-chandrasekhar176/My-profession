@@ -97,6 +97,28 @@ _DEFAULT_STRATEGIES = [
         "worst_regimes": ["Sideways"],
         "tags": ["reversal", "divergence"],
     },
+    {
+        "name": "VR",
+        "display_name": "Volume Reversal",
+        "description": "Volume Reversal strategy capturing climax volume exhaustion candles at extremes.",
+        "is_enabled": True,
+        "direction": "BOTH",
+        "timeframe": "5min",
+        "best_regimes": ["Volatile", "Sideways", "Bull", "Bear"],
+        "worst_regimes": [],
+        "tags": ["core", "volume", "reversal"],
+    },
+    {
+        "name": "BBR",
+        "display_name": "Bollinger Band Reversion",
+        "description": "Bollinger Band Reversion fading 2.5σ band pierces back toward the 20 SMA.",
+        "is_enabled": True,
+        "direction": "BOTH",
+        "timeframe": "5min",
+        "best_regimes": ["Sideways", "Bull", "Bear"],
+        "worst_regimes": ["Volatile"],
+        "tags": ["core", "mean_reversion", "bands"],
+    },
 ]
 
 
@@ -118,22 +140,46 @@ for _s in _DEFAULT_STRATEGIES:
     }
 
 
-def _sync_from_registry(engine: UltraBotEngine) -> None:
+def _sync_from_registry(engine: Optional[UltraBotEngine] = None) -> None:
     """Sync in-memory configs from the strategy registry if available."""
     try:
         from strategies.registry import StrategyRegistry
-        # Access registry from engine if it exists
-        if hasattr(engine, "_registry") and engine._registry is not None:
-            for name, instance in engine._registry.get_all().items():
-                if name not in _strategy_configs:
-                    _strategy_configs[name] = {}
-                _strategy_configs[name]["is_enabled"] = instance.enabled
-                _strategy_configs[name]["parameters"] = dict(instance.params or {})
+        registry = getattr(engine, "strategy_registry", None) or getattr(engine, "_registry", None)
+        if registry is None:
+            registry = StrategyRegistry()
+
+        for name, instance in registry.get_all().items():
+            disp_name = getattr(instance, "display_name", None) or getattr(instance, "name", name)
+            desc = getattr(instance, "description", "Automated algorithmic strategy with real-time risk guards.")
+            tags = getattr(instance, "tags", ["core"])
+            best_regimes = getattr(instance, "best_regimes", ["Bull", "Bear", "Sideways"])
+            worst_regimes = getattr(instance, "worst_regimes", [])
+
+            if name not in _strategy_configs:
+                _strategy_configs[name] = {
+                    "name": name,
+                    "display_name": disp_name,
+                    "description": desc,
+                    "is_enabled": getattr(instance, "enabled", True),
+                    "direction": getattr(instance, "direction", "BOTH"),
+                    "timeframe": getattr(instance, "timeframe", "5min"),
+                    "best_regimes": best_regimes,
+                    "worst_regimes": worst_regimes,
+                    "tags": tags,
+                    "parameters": dict(getattr(instance, "params", {}) or {}),
+                }
+            else:
+                _strategy_configs[name]["is_enabled"] = getattr(instance, "enabled", True)
+                _strategy_configs[name]["parameters"] = dict(getattr(instance, "params", {}) or {})
                 _strategy_configs[name]["name"] = instance.name
-                if hasattr(instance, "description"):
-                    _strategy_configs[name]["description"] = instance.description
-    except (ImportError, AttributeError):
-        pass
+                if disp_name and disp_name != name:
+                    _strategy_configs[name]["display_name"] = disp_name
+                if desc:
+                    _strategy_configs[name]["description"] = desc
+                if tags:
+                    _strategy_configs[name]["tags"] = tags
+    except Exception as e:
+        logger.warning("Strategy registry sync error: %s", e)
 
 
 @router.get("")
@@ -165,24 +211,51 @@ async def list_strategies(
         except Exception:
             pass
 
-        # Shadow strategies from config (engine falls back to the same list)
+        # Shadow strategies from engine or config settings fallback
+        shadow_set = set()
         try:
-            shadow_set = set(engine.shadow_strategies) if engine and hasattr(engine, "shadow_strategies") else set()
+            if engine and hasattr(engine, "shadow_strategies") and engine.shadow_strategies:
+                shadow_set = set(engine.shadow_strategies)
         except Exception:
-            shadow_set = set()
+            pass
+
+        if not shadow_set:
+            try:
+                from config.settings import get_settings
+                shadow_set = {str(s).upper() for s in get_settings().get_shadow_strategies()}
+            except Exception:
+                pass
 
         # Determine which are active in engine
-        active_set = set(engine.active_strategies) if engine else set()
+        active_set = set(engine.active_strategies) if engine and hasattr(engine, "active_strategies") else set()
+        is_engine_running = bool(getattr(engine, "is_running", False)) if engine else False
 
         result = []
         for name, config in _strategy_configs.items():
             perf = perf_map.get(name, {})
-            is_active = name in active_set
+            is_shadow = name.upper() in shadow_set
+            
+            if is_engine_running:
+                is_active = (name in active_set) and not is_shadow
+            else:
+                is_active = bool(config.get("is_enabled", True)) and not is_shadow
+
+            pause_reason = None
+            if is_shadow:
+                pause_reason = "shadow_mode"
+            elif is_engine_running and not is_active and config.get("is_enabled", True):
+                pause_reason = "regime_mismatch"
+            elif not config.get("is_enabled", True):
+                pause_reason = "manual_pause"
+
+            category = "shadow" if is_shadow else ("advanced" if "advanced" in config.get("tags", []) else "core")
 
             result.append({
                 **config,
+                "category": category,
                 "is_active_in_engine": is_active,
-                "is_shadow": name.upper() in shadow_set,
+                "is_shadow": is_shadow,
+                "pauseReason": pause_reason,
                 "performance": perf,
                 "shadow_performance": shadow_map.get(name),
             })

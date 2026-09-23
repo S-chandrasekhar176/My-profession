@@ -272,3 +272,112 @@ class TestEdgeCases:
         assert res.enabled is False
         assert res.current_level == 0
         assert res.trailing_sl_active is False
+
+
+class TestAdaptiveBooking:
+    def test_adaptive_levels_for_scalp(self, booker):
+        """When setup target is 0.60% (e.g. entry 100, target 100.60 < 1.0%),
+        triggers scale dynamically as fractions of target:
+        S1 = 0.60 * 0.40 = 0.24% -> 100.24
+        S2 = 0.60 * 0.60 = 0.36% -> 100.36 (Book 33%)
+        S3 = 0.60 * 0.80 = 0.48% -> 100.48 (Book 33%)
+        S4 = 0.60 * 1.00 = 0.60% -> 100.60 (Book 34%)
+        """
+        pos = make_position(entry=100.0, sl=99.5, target=100.60, quantity=100)
+        levels = booker.calculate_booking_levels(pos)
+        assert len(levels) == 4
+        assert levels[0].trigger_price == 100.24
+        assert levels[1].trigger_price == 100.36
+        assert levels[1].book_pct == 33.0
+        assert levels[2].trigger_price == 100.48
+        assert levels[2].book_pct == 33.0
+        assert levels[3].trigger_price == 100.60
+        assert levels[3].book_pct == 34.0
+
+    def test_adaptive_execution_lifecycle(self, booker):
+        """Simulate SONACOMS-like scalp: Entry 100, Target 100.60."""
+        pos = make_position(entry=100.0, sl=99.5, target=100.60, quantity=100)
+
+        # Move to +0.24% -> S1 trigger: lock BE
+        r1 = booker.check_and_book(pos, current_price=100.25)
+        assert r1.triggered_level == 1
+        assert pos.stop_loss == 100.05
+
+        # Move to +0.36% -> S2 trigger: book 33 shares
+        r2 = booker.check_and_book(pos, current_price=100.37)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 33
+        pos.quantity = 67
+
+        # Move to +0.48% -> S3 trigger: book 33 shares
+        r3 = booker.check_and_book(pos, current_price=100.49)
+        assert r3.triggered_level == 3
+        assert r3.book_qty == 33
+        pos.quantity = 34
+
+        # Move to +0.60% -> S4 trigger
+        r4 = booker.check_and_book(pos, current_price=100.60)
+        assert r4.triggered_level == 4
+        assert pos.stages_fired == [1, 2, 3, 4]
+
+    def test_micro_quantity_exemption(self, booker):
+        """When position size is small (< 10 shares, e.g. Maruti 3 shares),
+        skip partial exit orders (book_qty == 0) to prevent fee stacking,
+        while still ratcheting the trailing stop loss forward.
+        """
+        pos = make_position(entry=10000.0, sl=9900.0, quantity=3)
+
+        # Stage 1: Breakeven lock (+0.5% at 10050)
+        r1 = booker.check_and_book(pos, current_price=10050.0)
+        assert r1.triggered_level == 1
+        assert r1.book_qty == 0
+        assert pos.stop_loss == 10005.0
+
+        # Stage 2: First Book (+1.0% at 10100.0) -> exempt from exit orders!
+        r2 = booker.check_and_book(pos, current_price=10100.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 0  # No order placed!
+        assert r2.book_pct == 0.0
+        assert r2.remaining_qty == 3
+        assert r2.trailing_sl_active is True
+        assert r2.current_trailing_sl == 10070.0  # Trailing SL still advanced!
+        assert pos.stop_loss == 10070.0
+
+
+class TestFnoLotRounding:
+    def test_single_lot_fno_sub_lot_rounding(self, booker):
+        """For NIFTY (lot 75), 1 lot position (75 qty) should NOT book 19 shares.
+        Book quantity is rounded down to 0 lots, but trailing SL still ratchets forward.
+        """
+        pos = make_position(entry=24500.0, sl=24300.0, quantity=75)
+        pos.symbol = "NIFTY"
+
+        # Stage 1: Breakeven lock (+0.5% at 24622.5)
+        r1 = booker.check_and_book(pos, current_price=24625.0)
+        assert r1.triggered_level == 1
+        assert r1.book_qty == 0
+
+        # Stage 2: (+1.0% at 24745.0) -> 25% of 75 = 18.75 -> 19 shares -> below 75 -> 0 lots
+        r2 = booker.check_and_book(pos, current_price=24750.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 0
+        assert r2.book_pct == 0.0
+        assert r2.remaining_qty == 75
+        assert r2.trailing_sl_active is True
+        assert pos.stop_loss == pytest.approx(24500.0 * 1.007, abs=1.0)
+
+    def test_multi_lot_fno_rounds_to_lot_multiples(self, booker):
+        """For NIFTY (lot 75), 4 lots (300 qty):
+        Stage 2 (25%): 75 shares -> 1 lot booked.
+        """
+        pos = make_position(entry=24500.0, sl=24300.0, quantity=300)
+        pos.symbol = "NIFTY"
+        pos.stages_fired = [1]
+
+        # Stage 2: 25% of 300 = 75 shares = exactly 1 lot
+        r2 = booker.check_and_book(pos, current_price=24750.0)
+        assert r2.triggered_level == 2
+        assert r2.book_qty == 75
+        assert r2.remaining_qty == 225
+
+

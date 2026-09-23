@@ -29,8 +29,9 @@ import pytest
 from risk.position_sizer import PositionSizer
 
 
-BACKEND_ROOT = __file__.rsplit("/tests/", 1)[0]
-DEFAULTS_PATH = f"{BACKEND_ROOT}/config/defaults.yaml"
+from pathlib import Path
+BACKEND_ROOT = str(Path(__file__).resolve().parent.parent)
+DEFAULTS_PATH = Path(BACKEND_ROOT) / "config" / "defaults.yaml"
 
 
 def _load_shipped_config():

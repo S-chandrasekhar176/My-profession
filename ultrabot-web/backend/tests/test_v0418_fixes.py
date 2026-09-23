@@ -148,6 +148,14 @@ class _FakeFyersClient:
 
 
 def _mk_broker(payload, monkeypatch):
+    # Quarantine/isolate fyers_apiv3 at the test boundary
+    import sys
+    from unittest.mock import MagicMock
+    if "fyers_apiv3" not in sys.modules:
+        sys.modules["fyers_apiv3"] = MagicMock()
+    if "fyers_apiv3.fyersModel" not in sys.modules:
+        sys.modules["fyers_apiv3.fyersModel"] = MagicMock()
+
     import brokers.fyers as fyers_mod
 
     broker = fyers_mod.FyersBroker.__new__(fyers_mod.FyersBroker)
@@ -155,7 +163,8 @@ def _mk_broker(payload, monkeypatch):
     return broker
 
 
-def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
     payload = {
         "s": "ok",
         "d": [
@@ -166,30 +175,30 @@ def test_fyers_get_quotes_parses_realtime_fields(monkeypatch):
         ],
     }
     broker = _mk_broker(payload, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(
-        broker.get_quotes(["NIFTY", "SENSEX"])
-    )
+    out = await broker.get_quotes(["NIFTY", "SENSEX"])
     assert out["NIFTY"]["price"] == 24361.9
     assert out["NIFTY"]["changePct"] == 0.03
     assert out["NIFTY"]["previousClose"] == 24356.85
     assert out["SENSEX"]["change"] == -120.5
 
 
-def test_fyers_get_quotes_derives_missing_change_fields(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_derives_missing_change_fields(monkeypatch):
     payload = {
         "s": "ok",
         "d": [{"n": "NSE:NIFTY50-INDEX", "s": "ok",
                "v": {"lp": 100.0, "prev_close_price": 98.0}}],
     }
     broker = _mk_broker(payload, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(broker.get_quotes(["NIFTY"]))
+    out = await broker.get_quotes(["NIFTY"])
     assert out["NIFTY"]["change"] == pytest.approx(2.0)
     assert out["NIFTY"]["changePct"] == pytest.approx(2.04)
 
 
-def test_fyers_get_quotes_bad_payload_never_raises(monkeypatch):
+@pytest.mark.asyncio
+async def test_fyers_get_quotes_bad_payload_never_raises(monkeypatch):
     broker = _mk_broker({"s": "error"}, monkeypatch)
-    out = asyncio.get_event_loop().run_until_complete(broker.get_quotes(["NIFTY"]))
+    out = await broker.get_quotes(["NIFTY"])
     assert out == {}
 
 
@@ -299,3 +308,91 @@ async def test_eod_catchup_skips_before_1530():
     # We can't freeze the clock easily — assert the method exists & returns bool.
     assert hasattr(MarketLifecycleScheduler, "run_eod_summary_catchup")
     assert hasattr(MarketLifecycleScheduler, "_write_daily_summary")
+
+
+@pytest.mark.asyncio
+async def test_write_daily_summary_with_closed_trades_avoids_name_error():
+    """Backlog #0 (ebc1076 regression test): _write_daily_summary must fetch
+    todays_trades before computing ledger stats, preventing NameError / UnboundLocalError
+    when closed trades exist at EOD."""
+    from core.scheduler import MarketLifecycleScheduler
+    from types import SimpleNamespace
+
+    today_str = "2026-09-21"
+    now_iso = "2026-09-21T15:32:00"
+
+    trade_win = SimpleNamespace(
+        id="t-win",
+        symbol="RELIANCE",
+        direction="BUY",
+        pnl=1200.0,
+        net_pnl=1150.0,
+        fees=50.0,
+        status="CLOSED",
+    )
+    trade_loss = SimpleNamespace(
+        id="t-loss",
+        symbol="TCS",
+        direction="BUY",
+        pnl=-400.0,
+        net_pnl=-435.0,
+        fees=35.0,
+        status="CLOSED",
+    )
+
+    created_summaries = []
+
+    class _TempRepo:
+        async def get_todays_closed_trades(self):
+            return [trade_win, trade_loss]
+
+        async def create_daily_summary(self, **kwargs):
+            created_summaries.append(kwargs)
+            return kwargs
+
+        async def get_max_drawdown_pct(self):
+            return 1.25
+
+    mock_repo = _TempRepo()
+    mock_engine = SimpleNamespace(
+        config=SimpleNamespace(get_capital_config=lambda: {"virtual_capital": 500000.0}),
+        initial_capital=500000.0,
+        current_regime="Sideways",
+        vix=13.5,
+    )
+
+    sched = MarketLifecycleScheduler.__new__(MarketLifecycleScheduler)
+    sched.engine = mock_engine
+    sched._get_repo = lambda: mock_repo
+
+    # Call with (repo, today_str, now_iso) as specified in test contract
+    stats = await sched._write_daily_summary(mock_repo, today_str, now_iso)
+
+    # Assert required keys exist and match calculations
+    assert stats is not None
+    for k in (
+        "total_trades",
+        "wins",
+        "losses",
+        "net_pnl",
+        "gross_pnl",
+        "total_fees",
+        "best_trade",
+        "worst_trade",
+        "trades",
+    ):
+        assert k in stats, f"Missing expected key: {k}"
+
+    assert stats["total_trades"] == 2
+    assert stats["wins"] == 1
+    assert stats["losses"] == 1
+    assert stats["gross_pnl"] == 800.0   # 1200.0 - 400.0
+    assert stats["net_pnl"] == 715.0     # 1150.0 - 435.0
+    assert stats["total_fees"] == 85.0   # 50.0 + 35.0
+    assert stats["best_trade"] == 1150.0
+    assert stats["worst_trade"] == -435.0
+    assert len(stats["trades"]) == 2
+    assert stats["trades"] == [trade_win, trade_loss]
+    assert len(created_summaries) == 1
+    assert created_summaries[0]["date"] == today_str
+

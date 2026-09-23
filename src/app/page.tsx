@@ -631,49 +631,44 @@ export default function DashboardPage() {
     const todayPnl = +(unrealizedPnl + realizedPnl).toFixed(2);
 
     // 4. Capital Calculations
-    const totalCapital = configuredCapital > 0
-      ? configuredCapital
-      : typeof raw?.total_capital === 'number' && raw.total_capital > 0
-        ? raw.total_capital
-        : typeof raw?.capital?.total === 'number' && raw.capital.total > 0
-          ? raw.capital.total
-          : 1000000.0;
+    const totalCapital = typeof raw?.capital?.total === 'number' && raw.capital.total > 0
+      ? raw.capital.total
+      : configuredCapital > 0
+        ? configuredCapital
+        : typeof raw?.total_capital === 'number' && raw.total_capital > 0
+          ? raw.total_capital
+          : 500000.0;
 
     // v0.4.19: Capital Used = open-position EXPOSURE (entry x qty, full notional).
-    // The engine allocates capital on a full-notional basis everywhere —
-    // PositionSizer (position_size = entry x qty), G12 margin context,
-    // daily-risk capital_in_use and repo.get_capital_in_use all sum
-    // entry x qty with NO leverage factor. The previous x0.2 (5x MIS margin)
-    // shown here made the Dashboard report 5x less usage than the engine's
-    // own accounting and than the Trades tab's "Total Invested" (Sep-10:
-    // Dashboard 13,447.65 / 2.7% vs Trades 67,238 for the same 2 positions).
-    // The 5x margin figure is still shown as an informational hint below
-    // the utilization bar.
     const capitalUsed = +(positionsList.reduce((sum, p) => sum + (p.entry * p.qty), 0)).toFixed(2);
     const freeCapital = +(totalCapital - capitalUsed + todayPnl).toFixed(2);
     const todayPnlPercent = totalCapital > 0 ? +((todayPnl / totalCapital) * 100).toFixed(2) : 0;
 
-    // 5. Win Rate — computed from the ENGINE's daily P&L summary (real trades)
+    // 5. Win Rate & Trades Summary
     const pnlSummary = raw?.daily_pnl || {};
-    const totalTradesCount = Number(pnlSummary.total_trades) || tradesList.length;
-    const engineWins = Number(pnlSummary.wins) || 0;
-    const engineLosses = Number(pnlSummary.losses) || 0;
-    const winningTradesCount = engineWins > 0 ? engineWins : tradesList.filter((t) => t.pnl > 0).length;
-    const allTimeWinRate = totalTradesCount > 0 ? Math.round((winningTradesCount / totalTradesCount) * 100) : 0;
+    const allTimeSummary = raw?.all_time_pnl || {};
+    const todayTradesCount = Number(pnlSummary.total_trades) || tradesList.length;
+    const todayWins = Number(pnlSummary.wins) || tradesList.filter((t) => t.pnl > 0).length;
+    const todayWinningTradesCount = todayWins;
+    const todayLosses = Number(pnlSummary.losses) || 0;
+    const todayWinRate = todayTradesCount > 0 ? Math.round((todayWins / todayTradesCount) * 100) : 0;
 
-    const todayTradesCount = totalTradesCount;
-    const todayWinningTradesCount = winningTradesCount;
-    const todayWinRate = allTimeWinRate;
+    const allTimeTradesCount = Number(allTimeSummary.total_trades) || todayTradesCount;
+    const allTimeWins = Number(allTimeSummary.net_wins ?? allTimeSummary.gross_wins) || todayWins;
+    const allTimeWinRate = typeof allTimeSummary.net_win_rate === 'number'
+      ? Math.round(allTimeSummary.net_win_rate)
+      : (allTimeTradesCount > 0 ? Math.round((allTimeWins / allTimeTradesCount) * 100) : todayWinRate);
 
-    const hasExecutedTrades = totalTradesCount > 0;
+    // If today has trades, prioritize today; otherwise fall back to all-time historical performance
+    const totalTradesCount = todayTradesCount > 0 ? todayTradesCount : allTimeTradesCount;
+    const winningTradesCount = todayTradesCount > 0 ? todayWins : allTimeWins;
+    const winRate = todayTradesCount > 0 ? todayWinRate : allTimeWinRate;
+
+    const hasExecutedTrades = allTimeTradesCount > 0;
     const hasOpenPositions = positionsList.length > 0;
     const hasTradeHistory = hasExecutedTrades || hasOpenPositions;
 
-    let winRate = allTimeWinRate;
-    if (totalTradesCount === 0 && hasOpenPositions) {
-      const positive = positionsList.filter((p) => p.pnl > 0).length;
-      winRate = Math.round((positive / positionsList.length) * 100);
-    }
+    const allTimePnl = typeof allTimeSummary.net_pnl === 'number' ? Number(allTimeSummary.net_pnl) : todayPnl;
 
     // 6. Risk Used
     const riskUsed = capitalUsed > 0 ? Math.min(100, Math.max(8, Math.round((capitalUsed / totalCapital) * 100 * 2.5))) : 0;
@@ -698,6 +693,10 @@ export default function DashboardPage() {
         : (Array.isArray(stratData) ? stratData.map((s: any) => s.name || s.id).slice(0, 4) : []);
 
     const regConf = (raw?.regime_confidence || raw?.regimeConfidence || (typeof raw?.confidence === 'number' ? Math.round(raw.confidence * 100) : 0)) as number;
+    const todayGrossPnl = typeof pnlSummary.gross_pnl === 'number' ? Number(pnlSummary.gross_pnl) : todayPnl;
+    const todayFees = typeof pnlSummary.total_fees === 'number' ? Number(pnlSummary.total_fees) : 0;
+    const todayNetPnl = typeof pnlSummary.net_pnl === 'number' ? Number(pnlSummary.net_pnl) : todayPnl;
+    const todayGrossWinRate = typeof pnlSummary.win_rate === 'number' ? Number(pnlSummary.win_rate) : allTimeWinRate;
 
     return {
       todayPnl,
@@ -711,13 +710,17 @@ export default function DashboardPage() {
       todayWinRate,
       todayTradesCount,
       todayWinningTradesCount,
+      todayGrossPnl,
+      todayFees,
+      todayNetPnl,
+      todayGrossWinRate,
       hasTradeHistory,
       riskUsed,
       totalCapital,
       capitalUsed,
       freeCapital,
       dayPnl: todayPnl,
-      totalPnl: todayPnl,
+      totalPnl: allTimePnl,
       positions: positionsList,
       recentTrades: tradesList,
       engineStatus: (raw?.engine_status as string) ?? (raw?.engineStatus as string) ?? engineStatus ?? 'running',
@@ -919,7 +922,9 @@ export default function DashboardPage() {
                       The old "(All-Time)" label made Sep-9's 6/13 read like a
                       lifetime stat and contradicted the Trades tab (7/15). */}
                   {data.hasTradeHistory
-                    ? `${data.winningTradesCount}/${data.totalTradesCount} Won (Today)`
+                    ? data.todayTradesCount > 0
+                      ? `${data.todayWinningTradesCount}/${data.todayTradesCount} Won (Today)`
+                      : `${data.winningTradesCount}/${data.totalTradesCount} Won (All-Time)`
                     : 'Trades Won'}
                 </span>
                 <span
@@ -940,11 +945,15 @@ export default function DashboardPage() {
                         ? 'Moderate'
                         : 'Needs Tuning'}
                 </span>
-                {data.todayTradesCount > 0 && (
+                {data.todayTradesCount > 0 ? (
                   <span className="text-[10px] text-cyan-400 font-mono mt-0.5">
                     Today: {data.todayWinningTradesCount}/{data.todayTradesCount} ({data.todayWinRate}%)
                   </span>
-                )}
+                ) : data.hasTradeHistory ? (
+                  <span className="text-[10px] text-slate-400 font-mono mt-0.5">
+                    All-Time: {data.winningTradesCount}/{data.totalTradesCount} ({data.winRate}%)
+                  </span>
+                ) : null}
               </div>
             </div>
           </StatCard>

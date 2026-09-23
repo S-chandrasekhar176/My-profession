@@ -556,9 +556,23 @@ async def fyers_callback(
             from api.dependencies import get_engine as _get_engine
 
             engine = _get_engine()
-            apply_tokens_to_engine(engine, "fyers", {"kind": "fyers", "access_token": result["access_token"]})
+            app_id = str(cred_data.get("app_id") or cred_data.get("client_id") or "")
+            apply_tokens_to_engine(
+                engine,
+                "fyers",
+                {"kind": "fyers", "access_token": result["access_token"], "app_id": app_id},
+            )
         except Exception as apply_exc:
             logger.debug("Fyers feed hot-apply skipped: %s", apply_exc)
+
+        # Invalidate candles API cache so chart queries immediately switch to live Fyers feed
+        try:
+            from api.routes import candles as _candles_route
+            _candles_route._fyers_feed_cache = {"feed": None, "tried": False}
+            _candles_route._fyers_quotes_cache = {"broker": None, "tried": False, "token_sig": None}
+            logger.info("Invalidated Fyers chart and quotes cache on fresh OAuth callback")
+        except Exception as cache_exc:
+            logger.debug("Fyers cache invalidation skipped: %s", cache_exc)
 
         return RedirectResponse(f"{_FRONTEND_URL}/settings?broker=fyers&auth=success")
     except Exception as exc:

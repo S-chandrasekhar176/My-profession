@@ -42,16 +42,20 @@ _CACHE_TTL_SECONDS = 60.0
 _EMPTY_RESULTS_BEFORE_REBUILD = 2
 # Candle history window (calendar days). A 100-bar 5m request needs ~500
 # 1m bars ≈ 1.5 trading days; 5 calendar days covers holidays comfortably.
-_HISTORY_WINDOW_DAYS = 2
+_HISTORY_WINDOW_DAYS = 5
 
 # Engine/plain symbols → Fyers instruments.
 _INDEX_MAP = {
     "^NSEI": "NSE:NIFTY50-INDEX",
     "NIFTY": "NSE:NIFTY50-INDEX",
     "NIFTY50": "NSE:NIFTY50-INDEX",
+    "NIFTY 50": "NSE:NIFTY50-INDEX",
+    "NIFTY-50": "NSE:NIFTY50-INDEX",
     "^NSEBANK": "NSE:NIFTYBANK-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
     "NIFTYBANK": "NSE:NIFTYBANK-INDEX",
+    "BANK NIFTY": "NSE:NIFTYBANK-INDEX",
+    "BANK-NIFTY": "NSE:NIFTYBANK-INDEX",
     "FINNIFTY": "NSE:FINNIFTY-INDEX",
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
     "^INDIAVIX": "NSE:INDIAVIX-INDEX",
@@ -69,6 +73,8 @@ def to_fyers_symbol(symbol: str) -> str:
         return _INDEX_MAP[s]
     if ":" in s:
         return s  # already a Fyers-style symbol
+    if s == "NAM":
+        s = "NAM-INDIA"
     return f"NSE:{s}-EQ"
 
 
@@ -141,6 +147,7 @@ class FyersCandleFeed(BaseFeed):
         self._cache_ttl = float(cache_ttl_seconds)
         self._consecutive_empty = 0
         self._connected = True  # optimistic; failures flip it until a rebuild
+        self._last_request_ts: float = 0.0
 
     # ── Hot-swap (daily re-login) ─────────────────────────────
 
@@ -178,18 +185,25 @@ class FyersCandleFeed(BaseFeed):
         symbol: str,
         timeframe: str = "5m",
         count: int = 100,
+        force_refresh: bool = False,
     ) -> List[Dict[str, Any]]:
         tf = (timeframe or "5m").lower()
         cache_key = f"{symbol}:{tf}:{count}"
         now = time.time()
         cached = self._cache.get(cache_key)
-        if cached and (now - cached["ts"]) < self._cache_ttl:
+        if not force_refresh and cached and (now - cached["ts"]) < self._cache_ttl:
             return [dict(c) for c in cached["candles"]]
 
         try:
             fyers_sym = to_fyers_symbol(symbol)
             range_to = datetime.now(IST).date().isoformat()
             range_from = (datetime.now(IST) - timedelta(days=_HISTORY_WINDOW_DAYS)).date().isoformat()
+
+            # Pacing floor (~150ms) to ensure burst historical calls cannot exhaust rate limits
+            elapsed = time.monotonic() - self._last_request_ts
+            if elapsed < 0.15:
+                await asyncio.sleep(0.15 - elapsed)
+            self._last_request_ts = time.monotonic()
 
             # FyersBroker.get_candles(symbol, exchange, resolution, from, to)
             raw = await self._broker.get_candles(

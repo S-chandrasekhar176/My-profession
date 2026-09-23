@@ -75,3 +75,16 @@ async def test_limiter_throttling_completes_within_expected_time():
     # And the shared limiter status reports sane counters afterwards
     status = limiter.status()
     assert status["used_last_minute"] == 51
+
+
+@pytest.mark.asyncio
+async def test_paced_symbol_scan_avoids_limiter_queue_timeout():
+    """Verify that inter-request pacing (~150ms between sequential fetches) prevents
+    burst queue timeouts even when processing numerous symbols."""
+    limiter = RateLimiter(per_second=8, per_minute=200, name="test-paced")
+    # Simulate a paced scan loop over 15 symbols
+    for _ in range(15):
+        await limiter.acquire(timeout=30.0)
+        await asyncio.sleep(0.05)  # paced dispatch
+    assert limiter.status()["used_last_second"] <= 8
+

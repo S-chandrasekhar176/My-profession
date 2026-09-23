@@ -11,6 +11,8 @@ node_modules
 # testing
 /coverage
 .pytest_cache/
+.pytest_tmp/
+**/.pytest_tmp/
 /harness_tests/
 harness_tests/
 
@@ -31,7 +33,10 @@ __pycache__/
 *.pyd
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite3
+*.lock
 .encryption_key
 **/.encryption_key
 
@@ -44,6 +49,10 @@ defaults.local.yaml
 *.pem
 *.tar
 *.zip
+*.pdf
+reports/
+report.json
+*_report.json
 download/
 upload/
 

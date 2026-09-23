@@ -12,8 +12,12 @@ Trailing SL is ratchet-protected: it only moves forward with new peaks, never re
 from typing import Any, Dict, List, Optional, Union
 from types import SimpleNamespace
 import json
+import logging
 from models.risk_state import BookingLevels, BookingResult
 from utils.direction import is_long_direction
+from utils.market_utils import get_lot_size, is_fno_stock
+
+logger = logging.getLogger(__name__)
 
 
 class PartialBooker:
@@ -21,6 +25,7 @@ class PartialBooker:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         cfg = config or {}
+        self.config = cfg
         self.enabled: bool = cfg.get("enabled", True)
 
         # Brokerage / slippage buffer for Stage 1 breakeven lock (default 0.05%)
@@ -49,6 +54,9 @@ class PartialBooker:
 
         self.trailing_method: str = cfg.get("trailing_sl_method", "peak_trail")
         self.trailing_step_pct: float = float(cfg.get("trailing_step_pct", 0.5))
+
+        # Micro-quantity exemption: skip order splits if position is small to prevent fee drag
+        self.min_partial_qty: int = int(cfg.get("min_partial_qty", 10))
 
     def _normalize_position(
         self,
@@ -198,27 +206,71 @@ class PartialBooker:
         except Exception:
             pass
 
+    def _get_target_pct(self, position: Any) -> float:
+        """Calculate target move percentage if target is specified."""
+        entry = float(getattr(position, "entry_price", 0) or 0)
+        target = float(
+            getattr(position, "target", 0)
+            or getattr(position, "target_price", 0)
+            or 0
+        )
+        if entry > 0 and target > 0:
+            return abs(target - entry) / entry * 100.0
+        return 0.0
+
     def calculate_booking_levels(self, position: Any) -> List[BookingLevels]:
-        """Return the 4 standard booking levels for a position based on % move in favor."""
+        """Return booking levels for a position based on % move in favor or fraction of target."""
         entry = float(getattr(position, "entry_price", 0) or 0)
         direction = self._get_direction(position)
+        target_pct = self._get_target_pct(position)
+
+        # Adaptive Fraction-of-Target Mode: when setup target is smaller than Stage 2 trigger (e.g. MRF/Scalp < 1.0%)
+        is_adaptive = 0.0 < target_pct < self.s2_trigger_pct
+        if is_adaptive:
+            min_floor = float(self.config.get("min_s1_trigger_pct", 0.0))
+            raw_s1 = target_pct * 0.40
+            # If min_floor is configured and valid, clamp s1_pct above noise band
+            if 0.0 < min_floor < (target_pct * 0.60):
+                s1_pct = round(max(min_floor, raw_s1), 3)
+            else:
+                s1_pct = round(raw_s1, 3)
+            s2_pct = round(target_pct * 0.60, 3)
+            s3_pct = round(target_pct * 0.80, 3)
+            s4_pct = round(target_pct, 3)
+            s2_book = 33.0
+            s3_book = 33.0
+            s4_book = 34.0
+            s2_trail = round(max(0.05, target_pct * 0.20), 3)
+            s3_trail = round(max(0.05, target_pct * 0.20), 3)
+            s4_trail = round(max(0.05, target_pct * 0.25), 3)
+        else:
+            s1_pct = self.s1_trigger_pct
+            s2_pct = self.s2_trigger_pct
+            s3_pct = self.s3_trigger_pct
+            s4_pct = self.s4_trigger_pct
+            s2_book = self.s2_book_pct
+            s3_book = self.s3_book_pct
+            s4_book = self.s4_book_pct
+            s2_trail = self.s2_trail_pct
+            s3_trail = self.s3_trail_pct
+            s4_trail = self.s4_trail_pct
 
         if not is_long_direction(direction):
-            s1_trigger = entry * (1.0 - self.s1_trigger_pct / 100.0)
-            s2_trigger = entry * (1.0 - self.s2_trigger_pct / 100.0)
-            s3_trigger = entry * (1.0 - self.s3_trigger_pct / 100.0)
-            s4_trigger = entry * (1.0 - self.s4_trigger_pct / 100.0)
+            s1_trigger = entry * (1.0 - s1_pct / 100.0)
+            s2_trigger = entry * (1.0 - s2_pct / 100.0)
+            s3_trigger = entry * (1.0 - s3_pct / 100.0)
+            s4_trigger = entry * (1.0 - s4_pct / 100.0)
         else:
-            s1_trigger = entry * (1.0 + self.s1_trigger_pct / 100.0)
-            s2_trigger = entry * (1.0 + self.s2_trigger_pct / 100.0)
-            s3_trigger = entry * (1.0 + self.s3_trigger_pct / 100.0)
-            s4_trigger = entry * (1.0 + self.s4_trigger_pct / 100.0)
+            s1_trigger = entry * (1.0 + s1_pct / 100.0)
+            s2_trigger = entry * (1.0 + s2_pct / 100.0)
+            s3_trigger = entry * (1.0 + s3_pct / 100.0)
+            s4_trigger = entry * (1.0 + s4_pct / 100.0)
 
         levels: List[BookingLevels] = [
             BookingLevels(
                 level=1,
                 stage_name="Stage 1: Breakeven Lock",
-                trigger_pct=self.s1_trigger_pct,
+                trigger_pct=s1_pct,
                 book_pct=self.s1_book_pct,
                 trigger_price=round(s1_trigger, 2),
                 trail_pct=0.0,
@@ -226,26 +278,26 @@ class PartialBooker:
             BookingLevels(
                 level=2,
                 stage_name="Stage 2: First Book",
-                trigger_pct=self.s2_trigger_pct,
-                book_pct=self.s2_book_pct,
+                trigger_pct=s2_pct,
+                book_pct=s2_book,
                 trigger_price=round(s2_trigger, 2),
-                trail_pct=self.s2_trail_pct,
+                trail_pct=s2_trail,
             ),
             BookingLevels(
                 level=3,
                 stage_name="Stage 3: Main Book",
-                trigger_pct=self.s3_trigger_pct,
-                book_pct=self.s3_book_pct,
+                trigger_pct=s3_pct,
+                book_pct=s3_book,
                 trigger_price=round(s3_trigger, 2),
-                trail_pct=self.s3_trail_pct,
+                trail_pct=s3_trail,
             ),
             BookingLevels(
                 level=4,
                 stage_name="Stage 4: Runner Trail",
-                trigger_pct=self.s4_trigger_pct,
-                book_pct=self.s4_book_pct,
+                trigger_pct=s4_pct,
+                book_pct=s4_book,
                 trigger_price=round(s4_trigger, 2),
-                trail_pct=self.s4_trail_pct,
+                trail_pct=s4_trail,
             ),
         ]
         return levels
@@ -297,45 +349,93 @@ class PartialBooker:
         # Calculate percentage move in favorable direction
         if entry > 0:
             if is_long_direction(direction):
-                move_pct = (current_price - entry) / entry * 100.0
+                move_pct = round((current_price - entry) / entry * 100.0, 4)
             else:
-                move_pct = (entry - current_price) / entry * 100.0
+                move_pct = round((entry - current_price) / entry * 100.0, 4)
         else:
             move_pct = 0.0
 
         levels = self.calculate_booking_levels(position)
+
+        symbol = str(getattr(position, "symbol", "") or "")
+        is_fno = is_fno_stock(symbol) if symbol else False
+        lot_size = get_lot_size(symbol) if (is_fno and symbol) else 0
 
         triggered_level: Optional[int] = None
         book_pct: float = 0.0
         book_qty: int = 0
         stage_name: Optional[str] = None
 
+        lvl1, lvl2, lvl3, lvl4 = levels[0], levels[1], levels[2], levels[3]
+
         # Check stages sequentially (each stage fires exactly once)
-        if move_pct >= self.s1_trigger_pct and 1 not in stages_fired:
+        if move_pct >= lvl1.trigger_pct and 1 not in stages_fired:
             triggered_level = 1
-            stage_name = "Stage 1: Breakeven Lock"
-            book_pct = self.s1_book_pct
+            stage_name = lvl1.stage_name
+            book_pct = lvl1.book_pct
             book_qty = 0
             stages_fired.append(1)
 
-        elif move_pct >= self.s2_trigger_pct and 2 not in stages_fired:
+        elif move_pct >= lvl2.trigger_pct and 2 not in stages_fired:
             triggered_level = 2
-            stage_name = "Stage 2: First Book"
-            book_pct = self.s2_book_pct
-            book_qty = int(round(initial_qty * (self.s2_book_pct / 100.0)))
+            stage_name = lvl2.stage_name
+            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+            if is_fno and lot_size > 0:
+                raw_book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
+                book_qty = (raw_book_qty // lot_size) * lot_size
+                book_qty = min(book_qty, current_qty)
+                if raw_book_qty > 0 and book_qty == 0:
+                    book_pct = 0.0
+                    logger.debug(
+                        "Partial booker Stage 2: target book qty %d is below F&O lot size %d for %s; rounded to 0 lots",
+                        raw_book_qty, lot_size, symbol,
+                    )
+                else:
+                    book_pct = lvl2.book_pct
+            else:
+                if initial_qty < self.min_partial_qty:
+                    book_pct = 0.0
+                    book_qty = 0
+                else:
+                    book_pct = lvl2.book_pct
+                    book_qty = int(round(initial_qty * (lvl2.book_pct / 100.0)))
+                    if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                        book_qty = 1
+                    book_qty = min(book_qty, current_qty)
             stages_fired.append(2)
 
-        elif move_pct >= self.s3_trigger_pct and 3 not in stages_fired:
+        elif move_pct >= lvl3.trigger_pct and 3 not in stages_fired:
             triggered_level = 3
-            stage_name = "Stage 3: Main Book"
-            book_pct = self.s3_book_pct
-            book_qty = int(round(initial_qty * (self.s3_book_pct / 100.0)))
+            stage_name = lvl3.stage_name
+            current_qty = int(getattr(position, "quantity", initial_qty) or initial_qty)
+            if is_fno and lot_size > 0:
+                raw_book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
+                book_qty = (raw_book_qty // lot_size) * lot_size
+                book_qty = min(book_qty, current_qty)
+                if raw_book_qty > 0 and book_qty == 0:
+                    book_pct = 0.0
+                    logger.debug(
+                        "Partial booker Stage 3: target book qty %d is below F&O lot size %d for %s; rounded to 0 lots",
+                        raw_book_qty, lot_size, symbol,
+                    )
+                else:
+                    book_pct = lvl3.book_pct
+            else:
+                if initial_qty < self.min_partial_qty:
+                    book_pct = 0.0
+                    book_qty = 0
+                else:
+                    book_pct = lvl3.book_pct
+                    book_qty = int(round(initial_qty * (lvl3.book_pct / 100.0)))
+                    if book_qty == 0 and initial_qty >= 2 and current_qty >= 2:
+                        book_qty = 1
+                    book_qty = min(book_qty, current_qty)
             stages_fired.append(3)
 
-        elif move_pct >= self.s4_trigger_pct and 4 not in stages_fired:
+        elif move_pct >= lvl4.trigger_pct and 4 not in stages_fired:
             triggered_level = 4
-            stage_name = "Stage 4: Runner Trail"
-            book_pct = 0.0  # Hold remaining 45% in trailing runner mode
+            stage_name = lvl4.stage_name
+            book_pct = 0.0  # Hold remaining in trailing runner mode
             book_qty = 0
             stages_fired.append(4)
 
@@ -351,32 +451,37 @@ class PartialBooker:
         computed_sl: float = original_sl
 
         if 4 in stages_fired:
-            # Stage 4: Trail at 1.0% behind peak favorable price
+            # Stage 4: Trail behind peak favorable price
+            trail_pct = lvl4.trail_pct
             if is_long_direction(direction):
-                computed_sl = peak_price * (1.0 - self.s4_trail_pct / 100.0)
+                computed_sl = peak_price * (1.0 - trail_pct / 100.0)
             else:
-                computed_sl = peak_price * (1.0 + self.s4_trail_pct / 100.0)
+                computed_sl = peak_price * (1.0 + trail_pct / 100.0)
 
         elif 3 in stages_fired:
-            # Stage 3: Trail at 0.8% behind peak favorable price with 1.5% profit floor
+            # Stage 3: Trail behind peak favorable price with profit floor
+            trail_pct = lvl3.trail_pct
+            floor_pct = lvl1.trigger_pct if lvl3.trigger_pct < self.s3_trigger_pct else self.s3_floor_profit_pct
             if is_long_direction(direction):
-                floor_sl = entry * (1.0 + self.s3_floor_profit_pct / 100.0)
-                trail_sl = peak_price * (1.0 - self.s3_trail_pct / 100.0)
+                floor_sl = entry * (1.0 + floor_pct / 100.0)
+                trail_sl = peak_price * (1.0 - trail_pct / 100.0)
                 computed_sl = max(floor_sl, trail_sl)
             else:
-                floor_sl = entry * (1.0 - self.s3_floor_profit_pct / 100.0)
-                trail_sl = peak_price * (1.0 + self.s3_trail_pct / 100.0)
+                floor_sl = entry * (1.0 - floor_pct / 100.0)
+                trail_sl = peak_price * (1.0 + trail_pct / 100.0)
                 computed_sl = min(floor_sl, trail_sl)
 
         elif 2 in stages_fired:
-            # Stage 2: Trail at 0.5% behind peak favorable price with 0.7% profit floor
+            # Stage 2: Trail behind peak favorable price with profit floor
+            trail_pct = lvl2.trail_pct
+            floor_pct = (lvl1.trigger_pct / 2.0) if lvl2.trigger_pct < self.s2_trigger_pct else self.s2_floor_profit_pct
             if is_long_direction(direction):
-                floor_sl = entry * (1.0 + self.s2_floor_profit_pct / 100.0)
-                trail_sl = peak_price * (1.0 - self.s2_trail_pct / 100.0)
+                floor_sl = entry * (1.0 + floor_pct / 100.0)
+                trail_sl = peak_price * (1.0 - trail_pct / 100.0)
                 computed_sl = max(floor_sl, trail_sl)
             else:
-                floor_sl = entry * (1.0 - self.s2_floor_profit_pct / 100.0)
-                trail_sl = peak_price * (1.0 + self.s2_trail_pct / 100.0)
+                floor_sl = entry * (1.0 - floor_pct / 100.0)
+                trail_sl = peak_price * (1.0 + trail_pct / 100.0)
                 computed_sl = min(floor_sl, trail_sl)
 
         elif 1 in stages_fired:

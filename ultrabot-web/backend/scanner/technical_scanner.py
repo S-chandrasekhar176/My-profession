@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -89,6 +90,10 @@ class TechnicalScanner:
             except Exception as e:
                 logger.warning("Technical scan error for %s: %s", symbol, e, exc_info=True)
                 continue
+            finally:
+                # ~150ms inter-request pacing between symbol historical fetches
+                if not type(feed).__name__.startswith("Mock"):
+                    await asyncio.sleep(0.15)
 
         # Sort by confidence descending
         results.sort(key=lambda x: x["confidence"], reverse=True)

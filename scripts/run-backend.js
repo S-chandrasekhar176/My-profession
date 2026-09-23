@@ -76,6 +76,7 @@ const args = [
   '--app-dir', backendDir,
   '--host', HOST,
   '--port', String(PORT),
+  '--reload',
 ];
 
 console.log(`[dev:backend] ${pythonCmd} ${args.join(' ')}`);

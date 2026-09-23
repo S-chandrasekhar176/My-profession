@@ -10,12 +10,14 @@ import {
   Eye,
   ShieldAlert,
   LineChart,
+  Layers,
   Settings,
   AlertTriangle,
   LogOut,
   ChevronLeft,
   ChevronRight,
   Newspaper,
+  Sparkles,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSidebar, useAuth, useStore, BROKER_LIST } from '@/lib/store';
@@ -35,6 +37,8 @@ const navItems = [
   { label: 'Watchlist', icon: Eye, path: '/watchlist' },
   { label: 'Risk', icon: ShieldAlert, path: '/risk' },
   { label: 'Backtest', icon: LineChart, path: '/backtest' },
+  { label: 'Option Chain', icon: Layers, path: '/options' },
+  { label: 'Machine Learning', icon: Sparkles, path: '/ml' },
   { label: 'Settings', icon: Settings, path: '/settings' },
   { label: 'Errors', icon: AlertTriangle, path: '/errors' },
 ];

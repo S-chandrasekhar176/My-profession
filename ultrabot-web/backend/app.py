@@ -59,6 +59,8 @@ from api.routes import (
     scanner,
     candles,
     analytics,
+    options,
+    ml,
 )
 from api.websocket import ws_manager, router as ws_router
 
@@ -327,6 +329,112 @@ async def lifespan(app: FastAPI):
         )
         interactive_tg.start()
         app.state.telegram_interactive = interactive_tg
+    # -- Phase 2: F&O Option Chain Recorder ----------------------------
+    try:
+        from options.option_recorder import OptionChainRecorder
+
+        async def _resolve_fyers_broker_dynamic():
+            if fyers_feed is not None and getattr(fyers_feed, "_broker", None):
+                return fyers_feed._broker
+            try:
+                getter = repo_getter()
+                repo = await getter if asyncio.iscoroutine(getter) else getter
+                try:
+                    cred = await repo.get_broker_credentials("fyers")
+                    if cred and getattr(cred, "encrypted_credentials", None):
+                        from utils.encryption import decrypt_credentials
+                        from brokers.fyers import FyersBroker
+                        creds = decrypt_credentials(cred.encrypted_credentials) or {}
+                        app_id = str(creds.get("app_id") or creds.get("client_id") or "")
+                        access_token = str(creds.get("access_token") or "")
+                        if app_id and access_token:
+                            return FyersBroker(app_id=app_id, access_token=access_token)
+                finally:
+                    if hasattr(repo, "close"):
+                        res = repo.close()
+                        if asyncio.iscoroutine(res):
+                            await res
+            except Exception as b_err:
+                logger.debug("OptionChainRecorder dynamic broker resolution: %s", b_err)
+            return None
+
+        option_recorder = OptionChainRecorder(
+            broker=getattr(fyers_feed, "_broker", None) if fyers_feed else None,
+            broker_getter=_resolve_fyers_broker_dynamic,
+            repo_getter=repo_getter,
+            symbols=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"],
+            poll_interval_fast=5.0,
+            poll_interval_full=60.0,
+            market_hours=market_hours,
+        )
+        option_recorder.start()
+        app.state.option_recorder = option_recorder
+        eng.option_recorder = option_recorder
+
+        # Wave-1 style task supervisor for OptionChainRecorder with exponential backoff & circuit-breaking
+        async def _supervise_option_recorder():
+            consecutive_failures = 0
+            base_sleep = 15.0
+            max_sleep = 300.0
+            while True:
+                try:
+                    delay = min(max_sleep, base_sleep * (2 ** min(consecutive_failures, 4)))
+                    await asyncio.sleep(delay)
+                    rec = getattr(app.state, "option_recorder", None)
+                    if rec and getattr(rec, "_running", False):
+                        task = getattr(rec, "_fast_task", None)
+                        if task is None or task.done():
+                            consecutive_failures += 1
+                            if consecutive_failures > 10:
+                                logger.error(
+                                    "OptionChainRecorder fast poll failed %d times consecutively; pausing supervisor",
+                                    consecutive_failures,
+                                )
+                                await asyncio.sleep(300.0)
+                            else:
+                                logger.warning(
+                                    "OptionChainRecorder task was dead or done (failure %d); respawning...",
+                                    consecutive_failures,
+                                )
+                                rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
+                        else:
+                            consecutive_failures = 0
+                except asyncio.CancelledError:
+                    break
+                except Exception as sup_err:
+                    logger.debug("OptionChainRecorder supervisor error: %s", sup_err)
+
+        rec_supervisor_task = asyncio.create_task(_supervise_option_recorder())
+        app.state.option_recorder_supervisor = rec_supervisor_task
+        logger.info("OptionChainRecorder started: active with supervisor for NIFTY/BANKNIFTY chain ingestion")
+
+        # Recurring Daily maintenance: prune old option snapshots (>14 days) every 24 hours
+        async def _recurring_prune_old_snapshots_task():
+            while True:
+                try:
+                    getter = repo_getter()
+                    repo = await getter if asyncio.iscoroutine(getter) else getter
+                    try:
+                        if hasattr(repo, "prune_option_snapshots"):
+                            deleted = await repo.prune_option_snapshots(keep_days=14)
+                            if deleted > 0:
+                                logger.info("Daily maintenance: pruned %d option snapshots older than 14 days", deleted)
+                    finally:
+                        if hasattr(repo, "close"):
+                            res = repo.close()
+                            if asyncio.iscoroutine(res):
+                                await res
+                except asyncio.CancelledError:
+                    break
+                except Exception as prune_err:
+                    logger.debug("Option snapshot pruning task error: %s", prune_err)
+                await asyncio.sleep(86400.0)
+
+        prune_task = asyncio.create_task(_recurring_prune_old_snapshots_task())
+        app.state.option_prune_task = prune_task
+
+    except Exception as rec_exc:
+        logger.warning("OptionChainRecorder failed to start (non-fatal): %s", rec_exc)
 
     logger.info("UltraBot Web started")
     logger.info("Market status: %s", market_hours.get_market_status())
@@ -343,10 +451,33 @@ async def lifespan(app: FastAPI):
         app.state.db_backup_task.cancel()
     if hasattr(app.state, "db_backup_job"):
         app.state.db_backup_job.stop()
-    if hasattr(app.state, "telegram_interactive"):
-        await app.state.telegram_interactive.stop()
+    if hasattr(app.state, "option_recorder_supervisor") and app.state.option_recorder_supervisor:
+        app.state.option_recorder_supervisor.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(app.state.option_recorder_supervisor), timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+    if hasattr(app.state, "option_prune_task") and app.state.option_prune_task and not app.state.option_prune_task.done():
+        app.state.option_prune_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(app.state.option_prune_task), timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+    if hasattr(app.state, "option_recorder") and app.state.option_recorder:
+        try:
+            await asyncio.wait_for(app.state.option_recorder.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as opt_stop_err:
+            logger.warning("OptionChainRecorder stop timed out or failed: %s", opt_stop_err)
+    if hasattr(app.state, "telegram_interactive") and app.state.telegram_interactive:
+        try:
+            await asyncio.wait_for(app.state.telegram_interactive.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as tg_stop_err:
+            logger.debug("Telegram interactive stop error: %s", tg_stop_err)
     if eng.state.value != "stopped":
-        await eng.stop()
+        try:
+            await asyncio.wait_for(eng.stop(), timeout=5.0)
+        except (asyncio.TimeoutError, Exception) as eng_stop_err:
+            logger.warning("Engine stop timed out or failed: %s", eng_stop_err)
     logger.info("UltraBot Web stopped")
 
 
@@ -385,6 +516,8 @@ app.include_router(settings_api.router)
 app.include_router(scanner.router)
 app.include_router(candles.router)
 app.include_router(analytics.router)
+app.include_router(options.router)
+app.include_router(ml.router)
 app.include_router(ws_router)
 
 
@@ -464,6 +597,14 @@ async def health():
     except Exception as e:
         db_status = f"error: {str(e)}"
 
+    option_recorder_health = None
+    try:
+        rec = getattr(app.state, "option_recorder", None)
+        if rec is not None and hasattr(rec, "get_health"):
+            option_recorder_health = rec.get_health()
+    except Exception:
+        option_recorder_health = None
+
     return {
         "status": "healthy" if db_status == "ok" else "degraded",
         "app": settings.app_name,
@@ -480,6 +621,7 @@ async def health():
         "telegram_poll_timeout": tg_poll_timeout,
         "telegram_poll_respawns": tg_poll_respawns,
         "telegram_poll_last_death": tg_poll_last_death,
+        "option_recorder": option_recorder_health,
     }
 
 

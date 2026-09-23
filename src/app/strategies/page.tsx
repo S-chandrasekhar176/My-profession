@@ -37,8 +37,9 @@ interface Strategy {
   id: string;
   name: string;
   description: string;
-  category: 'core' | 'advanced';
+  category: 'core' | 'advanced' | 'shadow';
   active: boolean;
+  is_active_in_engine?: boolean;
   winRate: number | null;
   signals: number | null;
   trades: number | null;
@@ -137,23 +138,26 @@ function StrategyCard({ strategy, onToggle }: { strategy: Strategy; onToggle: (i
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-semibold text-ub-text-primary text-sm">{strategy.name}</span>
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      'text-[10px] px-1.5 py-0',
-                      strategy.active
-                        ? 'border-ub-profit/40 text-ub-profit bg-ub-profit/10'
-                        : 'border-ub-warning/40 text-ub-warning bg-ub-warning/10',
-                    )}
-                  >
-                    {strategy.active ? 'Active' : 'Paused'}
-                  </Badge>
-                  {strategy.shadow && (
+                  {strategy.shadow ? (
                     <Badge
                       variant="outline"
                       className="text-[10px] px-1.5 py-0 border-ub-accent/40 text-ub-accent bg-ub-accent/10"
                     >
-                      Shadow — signals recorded, no orders
+                      Shadow Mode (Incubation)
+                    </Badge>
+                  ) : strategy.active ? (
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] px-1.5 py-0 border-ub-profit/40 text-ub-profit bg-ub-profit/10"
+                    >
+                      Active
+                    </Badge>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      className="text-[10px] px-1.5 py-0 border-ub-warning/40 text-ub-warning bg-ub-warning/10"
+                    >
+                      {strategy.pauseReason === 'regime_mismatch' ? 'Paused (Regime)' : 'Paused'}
                     </Badge>
                   )}
                 </div>
@@ -170,9 +174,9 @@ function StrategyCard({ strategy, onToggle }: { strategy: Strategy; onToggle: (i
         </CollapsibleTrigger>
 
         <CardContent className="p-4 pt-0">
-          {strategy.pauseReason && !strategy.active && (
+          {strategy.pauseReason && !strategy.active && !strategy.shadow && (
             <p className="text-[11px] text-ub-warning mb-2">
-              ⚠ {strategy.pauseReason === 'regime_mismatch' ? 'Regime mismatch' : 'Manual pause'}
+              ⚠ {strategy.pauseReason === 'regime_mismatch' ? 'Paused: Regime filter not matched' : 'Manually paused'}
             </p>
           )}
 
@@ -192,13 +196,14 @@ function StrategyCard({ strategy, onToggle }: { strategy: Strategy; onToggle: (i
           ) : null}
 
           {strategy.shadow && strategy.shadowStats && strategy.shadowStats.total_signals > 0 && (
-            <p className="text-[11px] text-ub-text-muted mb-2">
-              Shadow tracking: {strategy.shadowStats.total_signals} signals —{' '}
+            <div className="rounded bg-ub-accent/5 border border-ub-accent/20 p-2 text-[11px] text-ub-text-muted mb-2">
+              <span className="font-semibold text-ub-accent">Shadow Telemetry: </span>
+              {strategy.shadowStats.total_signals} signals —{' '}
               {strategy.shadowStats.wins} hit target, {strategy.shadowStats.losses} stopped,{' '}
               {strategy.shadowStats.expired} expired, {strategy.shadowStats.pending} pending
               {strategy.shadowStats.resolved > 0 &&
-                ` (signal win rate ${strategy.shadowStats.signal_win_rate}% — separate from trade stats)`}
-            </p>
+                ` (signal win rate ${strategy.shadowStats.signal_win_rate}% — isolated from live capital)`}
+            </div>
           )}
 
           <div className="flex items-center gap-4 text-xs text-ub-text-muted mb-3">
@@ -275,8 +280,9 @@ export default function StrategiesPage() {
       const id = item.name || item.id || `strat-${idx}`;
       const name = item.display_name || item.name || item.id || 'Strategy';
       const description = item.description || 'Automated algorithmic strategy with real-time risk guards.';
-      const category = (Array.isArray(item.tags) && item.tags.includes('advanced')) || item.category === 'advanced' ? 'advanced' : 'core';
-      const active = Boolean(item.is_enabled ?? item.is_active ?? item.active ?? true);
+      const isShadow = Boolean(item.is_shadow || item.category === 'shadow');
+      const category = isShadow ? 'shadow' : ((Array.isArray(item.tags) && item.tags.includes('advanced')) || item.category === 'advanced' ? 'advanced' : 'core');
+      const active = Boolean(item.is_active_in_engine ?? item.is_enabled ?? item.is_active ?? item.active ?? true);
 
       // Honest performance stats — null (shown as "—") when the engine DB
       // has no history for the strategy. Never fabricate numbers.
@@ -309,13 +315,14 @@ export default function StrategiesPage() {
         description,
         category,
         active,
+        is_active_in_engine: item.is_active_in_engine,
         winRate,
         signals,
         trades,
         pauseReason: item.pauseReason,
         sparkline,
         params,
-        shadow: Boolean(item.is_shadow),
+        shadow: isShadow,
         shadowStats: item.shadow_performance ?? null,
       };
     });
@@ -324,8 +331,9 @@ export default function StrategiesPage() {
   const regimeConfig = REGIME_CONFIG[regime];
   const RegimeIcon = regimeConfig.icon;
 
-  const coreStrategies = useMemo(() => strategies.filter((s) => s.category === 'core'), [strategies]);
-  const advancedStrategies = useMemo(() => strategies.filter((s) => s.category === 'advanced'), [strategies]);
+  const coreStrategies = useMemo(() => strategies.filter((s) => s.category === 'core' && !s.shadow), [strategies]);
+  const advancedStrategies = useMemo(() => strategies.filter((s) => s.category === 'advanced' && !s.shadow), [strategies]);
+  const shadowStrategies = useMemo(() => strategies.filter((s) => s.shadow || s.category === 'shadow'), [strategies]);
 
   const handleToggle = (id: string, enabled: boolean) => {
     toggle({ name: id, isEnabled: enabled });
@@ -338,7 +346,7 @@ export default function StrategiesPage() {
         <CardHeader className="p-4 pb-3">
           <CardTitle className="text-base font-semibold text-ub-text-primary flex items-center gap-2">
             <Activity className="h-4 w-4 text-ub-accent" />
-            Market Regime
+            Market Regime & Strategy Allocation
           </CardTitle>
         </CardHeader>
         <CardContent className="p-4 pt-0 space-y-4">
@@ -377,10 +385,15 @@ export default function StrategiesPage() {
 
       {/* ── Core Strategies ── */}
       <section>
-        <h3 className="text-sm font-semibold text-ub-text-primary mb-3 flex items-center gap-2">
-          <span className="w-1.5 h-4 rounded-full bg-ub-accent" />
-          Core Strategies ({coreStrategies.length})
-        </h3>
+        <div className="mb-3">
+          <h3 className="text-sm font-semibold text-ub-text-primary flex items-center gap-2">
+            <span className="w-1.5 h-4 rounded-full bg-ub-accent" />
+            Core Active Strategies ({coreStrategies.length})
+          </h3>
+          <p className="text-xs text-ub-text-muted mt-0.5">
+            Production V2 algorithmic strategies actively deployed and dynamically governed by the current market regime.
+          </p>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {coreStrategies.map((s) => (
             <StrategyCard key={s.id} strategy={s} onToggle={handleToggle} />
@@ -389,17 +402,44 @@ export default function StrategiesPage() {
       </section>
 
       {/* ── Advanced Strategies ── */}
-      <section>
-        <h3 className="text-sm font-semibold text-ub-text-primary mb-3 flex items-center gap-2">
-          <span className="w-1.5 h-4 rounded-full bg-ub-volatile" />
-          Advanced Strategies ({advancedStrategies.length})
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {advancedStrategies.map((s) => (
-            <StrategyCard key={s.id} strategy={s} onToggle={handleToggle} />
-          ))}
-        </div>
-      </section>
+      {advancedStrategies.length > 0 && (
+        <section>
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-ub-text-primary flex items-center gap-2">
+              <span className="w-1.5 h-4 rounded-full bg-ub-volatile" />
+              Advanced Strategies ({advancedStrategies.length})
+            </h3>
+            <p className="text-xs text-ub-text-muted mt-0.5">
+              Multi-timeframe and specialized momentum strategies.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {advancedStrategies.map((s) => (
+              <StrategyCard key={s.id} strategy={s} onToggle={handleToggle} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ── Shadow / Incubation Strategies ── */}
+      {shadowStrategies.length > 0 && (
+        <section>
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-ub-text-primary flex items-center gap-2">
+              <span className="w-1.5 h-4 rounded-full bg-purple-500" />
+              Incubation & Shadow Strategies ({shadowStrategies.length})
+            </h3>
+            <p className="text-xs text-ub-text-muted mt-0.5">
+              These strategies generate and record forward-testing signals in the shadow sandbox without placing orders, accumulating statistical proof for promotion gates.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {shadowStrategies.map((s) => (
+              <StrategyCard key={s.id} strategy={s} onToggle={handleToggle} />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
