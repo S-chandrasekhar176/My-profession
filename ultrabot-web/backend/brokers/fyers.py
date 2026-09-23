@@ -175,13 +175,22 @@ class FyersBroker(BaseBroker):
 
     async def _call(self, limiter: RateLimiter, fn: Callable, *args, **kwargs) -> Any:
         """Run a synchronous SDK method off the event loop, gated by the
-        given rate limiter."""
+        given rate limiter and bounded by a 10.0s async timeout."""
         try:
             await limiter.acquire()
         except RateLimitExceeded as exc:
             logger.warning("Fyers rate limit hit: %s", exc)
             return {"s": "error", "message": str(exc)}
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout=10.0,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            fn_name = getattr(fn, "__name__", str(fn))
+            logger.warning("Fyers call to %s timed out after 10.0s", fn_name)
+            return {"s": "error", "message": f"Fyers call to {fn_name} timed out after 10.0s"}
+
 
     # ────────────────────────────────────────────────────────────
     # BaseBroker interface

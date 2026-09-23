@@ -383,8 +383,28 @@ async def lifespan(app: FastAPI):
                     rec = getattr(app.state, "option_recorder", None)
                     if rec and getattr(rec, "_running", False):
                         task = getattr(rec, "_fast_task", None)
-                        if task is None or task.done():
+                        health = rec.get_health() if hasattr(rec, "get_health") else {}
+                        last_poll_sec = health.get("last_poll_seconds_ago")
+                        is_stale = (
+                            last_poll_sec is not None
+                            and last_poll_sec > 180.0
+                            and getattr(rec, "_running", False)
+                        )
+                        if task is None or task.done() or is_stale:
                             consecutive_failures += 1
+                            if is_stale:
+                                logger.warning(
+                                    "OptionChainRecorder poll stale by %.1fs (>180s); cancelling stuck task and respawning (failure %d)...",
+                                    last_poll_sec,
+                                    consecutive_failures,
+                                )
+                                if task and not task.done():
+                                    task.cancel()
+                            else:
+                                logger.warning(
+                                    "OptionChainRecorder task was dead or done (failure %d); respawning...",
+                                    consecutive_failures,
+                                )
                             if consecutive_failures > 10:
                                 logger.error(
                                     "OptionChainRecorder fast poll failed %d times consecutively; pausing supervisor",
@@ -392,10 +412,6 @@ async def lifespan(app: FastAPI):
                                 )
                                 await asyncio.sleep(300.0)
                             else:
-                                logger.warning(
-                                    "OptionChainRecorder task was dead or done (failure %d); respawning...",
-                                    consecutive_failures,
-                                )
                                 rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
                         else:
                             consecutive_failures = 0
