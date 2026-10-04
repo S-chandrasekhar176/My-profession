@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from models.risk_state import GateResult, RiskResult
 
+from risk.gates.g0_stock_price import G0StockPrice
 from risk.gates.g1_max_positions import G1MaxPositions
 from risk.gates.g2_sector_concentration import G2SectorConcentration
 from risk.gates.g3_max_position_size import G3MaxPositionSize
@@ -56,7 +57,7 @@ class RiskEngine:
         self.gates: List[Any] = self._build_gates()
 
     def _build_gates(self) -> List[Any]:
-        """Construct all 19 gates fresh from the current config values.
+        """Construct all 20 gates fresh (G0 first, then G1..G19) from the current config values.
 
         Each gate reads its threshold(s) out of `config` in its own
         __init__ and caches them as plain instance attributes — cheap
@@ -65,6 +66,9 @@ class RiskEngine:
         values after a live settings change.
         """
         return [
+            # G0 FIRST: cheapest possible rejection — a sub-₹50 stock is
+            # untradable regardless of every other gate's outcome (#15).
+            G0StockPrice(self.config),
             G1MaxPositions(self.config),
             G2SectorConcentration(self.config),
             G3MaxPositionSize(self.config),

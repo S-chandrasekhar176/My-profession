@@ -315,10 +315,11 @@ class TestG19Modes:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestG19Wiring:
-    def test_risk_engine_registers_19_gates(self):
+    def test_risk_engine_registers_20_gates(self):
         re_ = RiskEngine({})
-        assert len(re_.gates) == 19
+        assert len(re_.gates) == 20
         names = [g.__class__.__name__ for g in re_.gates]
+        assert names[0] == "G0StockPrice"  # G0 first: cheapest rejection
         assert names[-1] == "G19MinMoveGate"
         assert "G18StrategyGuard" in names and "G17CostPreCheck" in names
 

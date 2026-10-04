@@ -343,10 +343,11 @@ async def test_g18_zero_daily_pnl_passes():
     assert res.passed
 
 
-def test_risk_engine_has_18_gates():
+def test_risk_engine_has_20_gates():
     re_ = RiskEngine({})
-    assert len(re_.gates) == 19
+    assert len(re_.gates) == 20
     names = [g.__class__.__name__ for g in re_.gates]
+    assert "G0StockPrice" in names and names[0] == "G0StockPrice"
     assert "G17CostPreCheck" in names and "G18StrategyGuard" in names
 
 

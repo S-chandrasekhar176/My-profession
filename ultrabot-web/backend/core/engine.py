@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from core.engine_state import EngineState, EngineMode
@@ -250,6 +250,12 @@ class UltraBotEngine:
         self._shadow_signals: Dict[str, dict] = {}
         # #19: duplicate shadow setups skipped at creation (churn dedup counter)
         self._shadow_churn_skips: int = 0
+        # G22 re-entry guard (#12-14): same-day stop-outs and entries per
+        # (strategy, symbol) — re-entry after a stop-out is churn, not edge
+        # (2026-09-22 IDEA: SL −₹1,551 then same-day re-entry).
+        self._reentry_stopouts: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        self._reentry_entries: Dict[Tuple[str, str], int] = {}
+        self._reentry_day: str = ""
         # Time stop config: {"default": 90, "PTC": 75, ...}
         _risk_cfg_init = self.config.get_risk_config() if hasattr(self.config, "get_risk_config") else {}
         _ts_cfg = _risk_cfg_init.get("time_stop_minutes", {}) or {}
@@ -511,7 +517,11 @@ class UltraBotEngine:
                         # same-day resume path: the restored session capital
                         # may have drifted from the trades-ledger truth
                         # (re-anchored / corrected ledger rows mid-day).
-                        if self.mode == "paper":
+                        # will_run_paper (not mode): a (mode=live,
+                        # broker=paper) boot also runs the PaperBroker and
+                        # needs the same reconciliation — zero impact for
+                        # the normal mode=paper path.
+                        if will_run_paper:
                             await self._reconcile_boot_capital_with_ledger()
                             # Re-align the broker ledger with the reconciled
                             # capital (the sync above ran pre-reconciliation;
@@ -2331,6 +2341,40 @@ class UltraBotEngine:
                         strategy_name, symbol, _cost_check_exc,
                     )
 
+                # G22 re-entry guard (#12-14): same-day re-entry after a
+                # stop-out is churn, not edge (2026-09-22 IDEA). Checked at
+                # creation so no signal row / opportunity is ever built.
+                # Only a str counts as a block — the real method returns
+                # str|None; anything else (uninitialized stub) fails open.
+                _g22_reason = self._reentry_guard_reason(strategy_name, symbol, current_price)
+                if not isinstance(_g22_reason, str):
+                    _g22_reason = None
+                if _g22_reason:
+                    logger.info(
+                        "Signal %s/%s rejected by Gate G22_Reentry: %s",
+                        strategy_name, symbol, _g22_reason,
+                    )
+                    if self._signals_passed_count > 0:
+                        self._signals_passed_count -= 1
+                    self._signals_rejected_count += 1
+                    self._rejections_by_gate["G22_Reentry"] = (
+                        self._rejections_by_gate.get("G22_Reentry", 0) + 1
+                    )
+                    self._rejections_by_strategy[strategy_name] = (
+                        self._rejections_by_strategy.get(strategy_name, 0) + 1
+                    )
+                    self._record_telemetry_event(
+                        symbol=symbol,
+                        strategy=strategy_name,
+                        status="REJECTED",
+                        direction=signal.get("direction", "—"),
+                        price=current_price,
+                        confidence=float(signal.get("confidence", 0.0)),
+                        gate="G22_Reentry",
+                        reason=_g22_reason,
+                    )
+                    continue
+
                 # Save signal to DB
                 # Strategies emit sl_price / target_price — use those canonical keys.
                 sig_obj = await repo.create_signal(
@@ -3373,6 +3417,110 @@ class UltraBotEngine:
             )
         return False
 
+    # ------------------------------------------------------------------
+    # G22 re-entry guard (#12-14): same-day re-entry after a stop-out is
+    # churn, not edge. Constants come from config with code fallbacks (no
+    # config/ diff), mirroring the G21 pattern.
+    # ------------------------------------------------------------------
+
+    def _reentry_config(self) -> Dict[str, Any]:
+        try:
+            cfg = self.config.get("risk", {}) if hasattr(self, "config") and isinstance(self.config, dict) else {}
+        except Exception:
+            cfg = {}
+        return {
+            "enabled": bool(cfg.get("reentry_guard_enabled", True)),
+            "max_entries": int(cfg.get("reentry_max_entries_per_symbol_day", 2)),
+            "hysteresis_pct": float(cfg.get("reentry_hysteresis_pct", 1.5)),
+        }
+
+    def _maybe_reset_reentry_day(self) -> None:
+        today = datetime.now(IST).date().isoformat()
+        if self._reentry_day != today:
+            self._reentry_day = today
+            self._reentry_stopouts = {}
+            self._reentry_entries = {}
+
+    def _record_reentry_entry(self, strategy_name: str, symbol: str) -> None:
+        """Count a real entry (called from the confirm chokepoint)."""
+        try:
+            self._maybe_reset_reentry_day()
+            key = (str(strategy_name).upper(), str(symbol).upper())
+            self._reentry_entries[key] = self._reentry_entries.get(key, 0) + 1
+        except Exception:
+            pass
+
+    def _record_reentry_stopout(
+        self, strategy_name: str, symbol: str, exit_price: float, exit_reason: str
+    ) -> None:
+        """Record a same-day stop-out (called from _close_position)."""
+        try:
+            self._maybe_reset_reentry_day()
+            key = (str(strategy_name).upper(), str(symbol).upper())
+            self._reentry_stopouts.setdefault(key, []).append({
+                "exit_price": float(exit_price or 0.0),
+                "exit_reason": str(exit_reason),
+                "regime": self.current_regime,
+                "at": datetime.now(IST).isoformat(),
+            })
+        except Exception:
+            pass
+
+    def _reentry_guard_reason(
+        self, strategy_name: str, symbol: str, current_price: float
+    ) -> Optional[str]:
+        """Return a block reason if this (strategy, symbol) re-entry is churn.
+
+        Blocks when:
+          * the daily entry cap is reached, OR
+          * the strategy stopped out on this symbol today AND the price
+            hasn't moved beyond the hysteresis band AND the regime hasn't
+            changed since the stop-out (re-arm condition).
+        Fails OPEN on any internal error (guard must never break the scan).
+        """
+        try:
+            # Fail-open unless the guard state is a real dict — covers
+            # partially-initialized engines and test stubs (a spec'd mock
+            # would otherwise make every attribute access truthy).
+            stopouts_map = getattr(self, "_reentry_stopouts", None)
+            entries_map = getattr(self, "_reentry_entries", None)
+            if not isinstance(stopouts_map, dict) or not isinstance(entries_map, dict):
+                return None
+            cfg = self._reentry_config()
+            if not cfg["enabled"]:
+                return None
+            self._maybe_reset_reentry_day()
+            key = (str(strategy_name).upper(), str(symbol).upper())
+
+            if self._reentry_entries.get(key, 0) >= cfg["max_entries"]:
+                return (
+                    f"Max {cfg['max_entries']} entries/symbol/day reached "
+                    f"(G22 re-entry guard)"
+                )
+
+            stopouts = self._reentry_stopouts.get(key) or []
+            if not stopouts:
+                return None
+            last = stopouts[-1]
+            ref = float(last.get("exit_price") or 0.0)
+            moved_pct = (
+                abs(float(current_price or 0.0) - ref) / ref * 100.0
+                if ref > 0 else 100.0
+            )
+            regime_changed = bool(
+                last.get("regime") and self.current_regime
+                and last.get("regime") != self.current_regime
+            )
+            if moved_pct < cfg["hysteresis_pct"] and not regime_changed:
+                return (
+                    f"Same-day re-entry after {last.get('exit_reason')} @ ₹{ref:.2f} "
+                    f"blocked — price moved {moved_pct:.1f}% (< {cfg['hysteresis_pct']}% "
+                    f"hysteresis) and regime unchanged (G22 re-entry guard)"
+                )
+        except Exception:
+            return None  # fail open
+        return None
+
     def _register_shadow(
         self,
         *,
@@ -4040,6 +4188,18 @@ class UltraBotEngine:
         # sized as equity (not lot-constrained as futures).
         sizing = await self._calculate_position_size(signal_data, current_price, segment=segment)
         quantity = sizing.get("quantity", quantity)
+
+        # G22 re-entry guard chokepoint (#12-14): a pending opportunity
+        # created BEFORE a same-day stop-out must not confirm into churn.
+        # Only a str counts as a block (fail-open on anything else).
+        _g22_reason = self._reentry_guard_reason(strategy, symbol, current_price)
+        if not isinstance(_g22_reason, str):
+            _g22_reason = None
+        if _g22_reason:
+            await _resolve_popped_signal("rejected", _g22_reason)
+            logger.info("Opportunity %s confirm blocked: %s", opportunity_id, _g22_reason)
+            return {"status": "rejected", "reason": _g22_reason}
+        self._record_reentry_entry(strategy, symbol)
 
         # --- FNO Options Execution Branch ---
         trade_symbol = symbol
@@ -5277,6 +5437,19 @@ class UltraBotEngine:
                 current_price=effective_exit_price,
                 status="CLOSED",
             )
+
+        # G22 re-entry guard (#12-14): feed same-day stop-outs so a
+        # re-signal on this symbol today gets blocked at creation/confirm.
+        if exit_class in ("SL", "TRAILING_SL", "FAIL_FAST"):
+            try:
+                self._record_reentry_stopout(
+                    getattr(position, "strategy", "") or "",
+                    getattr(position, "symbol", "") or "",
+                    float(effective_exit_price or 0.0),
+                    exit_class,
+                )
+            except Exception:
+                pass
 
         # Update daily risk tracker if present
         # NOTE: DailyRiskManager's real method is record_trade_result(); the

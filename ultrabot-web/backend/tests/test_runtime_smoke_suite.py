@@ -76,7 +76,7 @@ class TestRuntimeSmokeSuite(unittest.IsolatedAsyncioTestCase):
             "no_trade_after": "15:15",
         }
         re = RiskEngine(config)
-        self.assertEqual(len(re.gates), 19, "RiskEngine must have exactly 19 gates (G1-G16 + G17 CostPreCheck + G18 StrategyGuard + G19 MinMove)")
+        self.assertEqual(len(re.gates), 20, "RiskEngine must have exactly 20 gates (G0 StockPrice + G1-G16 + G17 CostPreCheck + G18 StrategyGuard + G19 MinMove)")
 
         # Mock signal & context with 0.0% drawdown and high confidence
         signal = {
@@ -105,7 +105,7 @@ class TestRuntimeSmokeSuite(unittest.IsolatedAsyncioTestCase):
 
         result = await re.evaluate(signal, context)
         self.assertTrue(result.passed, f"Risk evaluation failed: {result.block_reason}")
-        self.assertEqual(len(result.all_gates), 19)
+        self.assertEqual(len(result.all_gates), 20)  # G0 runs first, all gates report
 
         # Check G11 Gate
         g11_result = next((g for g in result.all_gates if "G11" in g.gate_name or "Drawdown" in g.gate_name), None)
