@@ -34,6 +34,7 @@ from db.migrations import (
 )
 
 from utils.market_utils import get_stock_sector
+from core.shadow_dedup import cluster_effective_setups
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -800,6 +801,11 @@ class Repository:
         result = await self.session.execute(stmt)
         signals = list(result.scalars().all())
 
+        # #19: effective_n = unique setups (duplicates of one setup fired
+        # every scan cycle cluster into one sample). Read-only — no rows are
+        # deleted or rewritten; the ML feature store stays intact.
+        effective = cluster_effective_setups(signals)
+
         stats: Dict[str, Dict[str, Any]] = {}
         for sig in signals:
             name = sig.strategy or "UNKNOWN"
@@ -844,6 +850,30 @@ class Repository:
             rr_sum = entry.pop("_rr_sum", 0.0)
             rr_n = entry.pop("_rr_n", 0)
             entry["avg_risk_reward"] = round(rr_sum / rr_n, 2) if rr_n > 0 else None
+            # #19: raw vs deduped counts. resolved_raw keeps the historical
+            # meaning of "resolved"; effective_n is the verdict-gate input.
+            entry["resolved_raw"] = entry["resolved"]
+            entry["effective_n"] = 0
+            entry["effective_wins"] = 0
+            entry["effective_losses"] = 0
+            entry["effective_expired"] = 0
+            entry["effective_win_rate"] = 0.0
+            entry["churn_ratio"] = 0.0
+        for name, entry in stats.items():
+            eff = effective.get(name, {})
+            entry["effective_n"] = int(eff.get("effective_n", 0))
+            entry["effective_wins"] = int(eff.get("effective_wins", 0))
+            entry["effective_losses"] = int(eff.get("effective_losses", 0))
+            entry["effective_expired"] = int(eff.get("effective_expired", 0))
+            entry["churn_ratio"] = (
+                round(entry["resolved_raw"] / entry["effective_n"], 2)
+                if entry["effective_n"] > 0 else 0.0
+            )
+            eff_decided = entry["effective_wins"] + entry["effective_losses"]
+            entry["effective_win_rate"] = (
+                round(entry["effective_wins"] / eff_decided * 100.0, 2)
+                if eff_decided > 0 else 0.0
+            )
         return stats
 
     async def get_regime_attribution(self) -> List[Dict[str, Any]]:

@@ -641,6 +641,9 @@ def _scan_engine_stub(repo):
     # actual registration path (autospec mocks would swallow registrations).
     eng._shadow_recorder_enabled = True
     eng._register_shadow = UltraBotEngine._register_shadow.__get__(eng)
+    # #19: bind the REAL dedup check (spec'd MagicMock would make the async
+    # method an AsyncMock returning truthy — every setup would look dup'd).
+    eng._is_duplicate_shadow_setup = UltraBotEngine._is_duplicate_shadow_setup.__get__(eng)
     eng._shadow_realtime = MagicMock(return_value=True)
     eng.current_regime = "Bull"
     eng.vix = 14.0

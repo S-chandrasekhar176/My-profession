@@ -84,33 +84,48 @@ def evaluate_strategy_verdicts(
         except (TypeError, ValueError):
             continue
 
+        # #19: the sample gate consumes DEDUPED counts. Churn (identical
+        # setups re-fired every scan cycle) inflates raw resolved ~3x; a
+        # verdict near the margin can flip on dedup alone. effective_n from
+        # Repository.compute_shadow_signal_stats(); falls back to raw for
+        # callers that predate the field.
+        effective_n = int(st.get("effective_n", 0) or 0)
+        churn_ratio = float(st.get("churn_ratio", 0.0) or 0.0)
+        eff_wr = st.get("effective_win_rate")
+        eff_wr = float(eff_wr) if eff_wr is not None else None
+        sample = effective_n if effective_n > 0 else resolved
+        # Decision win-rate: deduped when available (wins over decided
+        # setups, expired excluded), else the raw decided-only rate.
+        dec_wr = eff_wr if eff_wr is not None else wr
+
         be = _breakeven_for(name, st.get("avg_risk_reward"))
         key = (name or "").upper()
 
         if total <= 0:
             verdict, rationale = "NO_DATA", "No shadow signals recorded yet."
-        elif resolved < MIN_SAMPLE:
+        elif sample < MIN_SAMPLE:
             verdict = "KEEP_COLLECTING"
             rationale = (
-                f"Sample {resolved}/{MIN_SAMPLE} resolved — verdicts unlock at "
-                f"{MIN_SAMPLE} resolved shadow signals."
+                f"Sample {sample}/{MIN_SAMPLE} unique setups "
+                f"({resolved} raw resolved) — verdicts unlock at "
+                f"{MIN_SAMPLE} effective shadow signals."
             )
-        elif wr >= be + PROMOTE_MARGIN_PCT:
+        elif dec_wr >= be + PROMOTE_MARGIN_PCT:
             verdict = "PROMOTE_CANDIDATE"
             rationale = (
-                f"Win-rate {wr}% ≥ breakeven {be}% + {PROMOTE_MARGIN_PCT}pp margin "
-                f"over {resolved} resolved signals."
+                f"Win-rate {dec_wr}% ≥ breakeven {be}% + {PROMOTE_MARGIN_PCT}pp margin "
+                f"over {sample} unique setups."
             )
-        elif wr < be - RETIRE_MARGIN_PCT:
+        elif dec_wr < be - RETIRE_MARGIN_PCT:
             verdict = "RETIRE_CANDIDATE"
             rationale = (
-                f"Win-rate {wr}% < breakeven {be}% − {RETIRE_MARGIN_PCT}pp margin "
-                f"over {resolved} resolved signals."
+                f"Win-rate {dec_wr}% < breakeven {be}% − {RETIRE_MARGIN_PCT}pp margin "
+                f"over {sample} unique setups."
             )
         else:
             verdict = "BORDERLINE"
             rationale = (
-                f"Win-rate {wr}% is within ±{PROMOTE_MARGIN_PCT}pp of the "
+                f"Win-rate {dec_wr}% is within ±{PROMOTE_MARGIN_PCT}pp of the "
                 f"{be}% fee-adjusted breakeven — not decisive either way."
             )
 
@@ -119,6 +134,10 @@ def evaluate_strategy_verdicts(
             "is_live": key in live,
             "total_signals": total,
             "resolved": resolved,
+            "resolved_raw": resolved,
+            "effective_n": effective_n if effective_n > 0 else resolved,
+            "churn_ratio": churn_ratio,
+            "effective_win_rate": dec_wr,
             "wins": wins,
             "losses": losses,
             "expired": int(st.get("expired", 0) or 0),

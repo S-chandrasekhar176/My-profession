@@ -37,6 +37,7 @@ from shadow.shadow_utils import (
     feed_is_realtime,
     update_excursion,
 )
+from core.shadow_dedup import setup_key as _shadow_setup_key
 from core.capital_resolver import resolve_total_capital
 from core.event_bus import EventBus, EventPriority
 from feeds.tick_bar_aggregator import TickBarAggregator
@@ -247,6 +248,8 @@ class UltraBotEngine:
         self._shadow_scan_strategies: List[str] = [str(s) for s in _shadow_raw if str(s)]
         # In-memory registry of unresolved shadow signals (signal_id -> data)
         self._shadow_signals: Dict[str, dict] = {}
+        # #19: duplicate shadow setups skipped at creation (churn dedup counter)
+        self._shadow_churn_skips: int = 0
         # Time stop config: {"default": 90, "PTC": 75, ...}
         _risk_cfg_init = self.config.get_risk_config() if hasattr(self.config, "get_risk_config") else {}
         _ts_cfg = _risk_cfg_init.get("time_stop_minutes", {}) or {}
@@ -1969,43 +1972,65 @@ class UltraBotEngine:
                 # record before capital is committed.
                 # ----------------------------------------------------------
                 if strategy_name.upper() in self.shadow_strategies:
+                    # #19 churn dedup: while an unresolved SHADOW row with the
+                    # same setup key exists today, the scan loop is re-firing
+                    # ONE setup (~90s cadence) — skip the duplicate row.
+                    # Telemetry/broadcast below still fire either way.
+                    _setup_k = _shadow_setup_key(
+                        strategy_name,
+                        symbol,
+                        signal.get("direction", "LONG"),
+                        float(signal.get("entry_price") or current_price),
+                        float(signal.get("sl_price") or 0.0),
+                        float(signal.get("target_price") or 0.0),
+                    )
                     try:
-                        sig_obj = await repo.create_signal(
-                            symbol=symbol,
-                            direction=signal.get("direction", "LONG"),
-                            strategy=strategy_name,
-                            confidence=signal.get("confidence", 0),
-                            entry_price=signal.get("entry_price", current_price),
-                            stop_loss=signal.get("sl_price", 0),
-                            target=signal.get("target_price", 0),
-                            risk_reward=signal.get("risk_reward"),
-                            status="SHADOW",
-                            signal_data=signal,
-                            risk_gate_results=risk_result.get("all_gates", []),
-                            session_id=self.session_id,
-                            regime_at_signal=self.current_regime,
-                            vix_at_signal=self.vix,
-                        )
-                        if sig_obj is not None:
-                            self._register_shadow(
-                                signal_id=sig_obj.id,
+                        _is_dup = bool(await self._is_duplicate_shadow_setup(_setup_k))
+                    except Exception:
+                        _is_dup = False  # fail OPEN — record raw, stats-layer dedup catches it
+                    if not _is_dup:
+                        try:
+                            sig_obj = await repo.create_signal(
                                 symbol=symbol,
                                 direction=signal.get("direction", "LONG"),
                                 strategy=strategy_name,
-                                entry_price=float(signal.get("entry_price") or current_price),
-                                stop_loss=float(signal.get("sl_price") or 0.0),
-                                target=float(signal.get("target_price") or 0.0),
-                                kind=KIND_STRATEGY_SHADOW,
+                                confidence=signal.get("confidence", 0),
+                                entry_price=signal.get("entry_price", current_price),
+                                stop_loss=signal.get("sl_price", 0),
+                                target=signal.get("target_price", 0),
+                                risk_reward=signal.get("risk_reward"),
+                                status="SHADOW",
                                 signal_data=signal,
-                                created_at=str(sig_obj.created_at),
-                                regime=self.current_regime,
-                                vix=self.vix,
+                                risk_gate_results=risk_result.get("all_gates", []),
+                                session_id=self.session_id,
+                                regime_at_signal=self.current_regime,
+                                vix_at_signal=self.vix,
                             )
-                    except Exception as shadow_rec_err:
-                        logger.warning(
-                            "Shadow signal recording failed for %s/%s: %s",
-                            strategy_name, symbol, shadow_rec_err,
-                        )
+                            if sig_obj is not None:
+                                self._register_shadow(
+                                    signal_id=sig_obj.id,
+                                    symbol=symbol,
+                                    direction=signal.get("direction", "LONG"),
+                                    strategy=strategy_name,
+                                    entry_price=float(signal.get("entry_price") or current_price),
+                                    stop_loss=float(signal.get("sl_price") or 0.0),
+                                    target=float(signal.get("target_price") or 0.0),
+                                    kind=KIND_STRATEGY_SHADOW,
+                                    signal_data=signal,
+                                    created_at=str(sig_obj.created_at),
+                                    regime=self.current_regime,
+                                    vix=self.vix,
+                                )
+                        except Exception as shadow_rec_err:
+                            logger.warning(
+                                "Shadow signal recording failed for %s/%s: %s",
+                                strategy_name, symbol, shadow_rec_err,
+                            )
+                    else:
+                        try:
+                            self._shadow_churn_skips += 1
+                        except Exception:
+                            pass
                     self._record_telemetry_event(
                         symbol=symbol,
                         strategy=strategy_name,
@@ -3316,6 +3341,37 @@ class UltraBotEngine:
             return bool(self._is_realtime_feed_active())
         except Exception:
             return feed_is_realtime(self.feed)
+
+    async def _is_duplicate_shadow_setup(self, key: tuple) -> bool:
+        """#19 churn dedup: is this setup already an unresolved SHADOW row today?
+
+        Compares the candidate's setup key (strategy, symbol, direction,
+        rounded geometry) against today's unresolved shadow signals. A hit
+        means the scan loop is re-firing one setup — the duplicate row is
+        skipped (telemetry still records the event). Fails OPEN: if the DB
+        check errors, the signal is recorded (raw counting is the safe
+        default; statistics-layer dedup catches it anyway).
+        """
+        try:
+            async with self._repo_context() as repo:
+                if repo is None:
+                    return False
+                for row in await repo.get_todays_shadow_signals():
+                    if _shadow_setup_key(
+                        getattr(row, "strategy", None),
+                        getattr(row, "symbol", None),
+                        getattr(row, "direction", None),
+                        getattr(row, "entry_price", None),
+                        getattr(row, "stop_loss", None),
+                        getattr(row, "target", None),
+                    ) == key:
+                        return True
+        except Exception:
+            logger.warning(
+                "Shadow churn dedup check failed (recording raw): %s",
+                key, exc_info=True,
+            )
+        return False
 
     def _register_shadow(
         self,
