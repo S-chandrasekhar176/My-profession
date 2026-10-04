@@ -407,12 +407,12 @@ async def lifespan(app: FastAPI):
                                 )
                             if consecutive_failures > 10:
                                 logger.error(
-                                    "OptionChainRecorder fast poll failed %d times consecutively; pausing supervisor",
+                                    "OptionChainRecorder fast poll failed %d times consecutively; pausing supervisor for 60s before retry",
                                     consecutive_failures,
                                 )
-                                await asyncio.sleep(300.0)
-                            else:
-                                rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
+                                await asyncio.sleep(60.0)
+                                consecutive_failures = 0
+                            rec._fast_task = asyncio.create_task(rec._fast_poll_loop())
                         else:
                             consecutive_failures = 0
                 except asyncio.CancelledError:
