@@ -402,13 +402,18 @@ def test_telegram_loop_supervision_respawns_then_caps():
     asyncio.run(_inner())
 
 
-def test_poll_loop_hung_handler_does_not_block_next_message(monkeypatch):
+def test_poll_loop_hung_handler_does_not_block_next_message(monkeypatch, tmp_path):
     """The 11:16-IST freeze: a hung /command used to wedge ALL polling.
     Bounded dispatch must cancel the hung handler and keep serving."""
     import notifications.telegram_interactive as tg_mod
 
     monkeypatch.setattr(tg_mod, "_HANDLER_TIMEOUT_S", 0.05)
     bot = _mk_bot()
+    # Isolate the polling lock: the default relative path (data/telegram_poll.lock)
+    # is held by the LIVE engine whenever it is running, which would make this
+    # test's poller disable itself and fail spuriously (found 2026-10-05).
+    from notifications.telegram_interactive import TelegramPollLock
+    bot._poll_lock = TelegramPollLock(lockfile_path=str(tmp_path / "telegram_poll.lock"))
 
     async def _inner():
         handled = []
