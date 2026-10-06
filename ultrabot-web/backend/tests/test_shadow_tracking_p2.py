@@ -166,7 +166,7 @@ def test_defaults_yaml_shadow_list_matches_registry_exactly():
     cfg = _load_defaults_cfg()
     shadow_list = cfg.get("strategy_shadow_mode", [])
 
-    assert len(shadow_list) == 17, "TRS + 14 dormant strategies + VR + BBR expected"
+    assert len(shadow_list) == 18, "TRS + 14 dormant strategies + VR + BBR + VEB expected"
     reg = StrategyRegistry()
     reg.discover()
     registered = set(reg.get_all().keys())

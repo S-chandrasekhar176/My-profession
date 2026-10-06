@@ -111,6 +111,7 @@ strategy_shadow_mode:
 - VWAPReversion
 - VR
 - BBR
+- VEB
 paper_broker:
   slippage:
     enabled: true

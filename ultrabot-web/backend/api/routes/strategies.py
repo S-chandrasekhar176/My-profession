@@ -119,6 +119,17 @@ _DEFAULT_STRATEGIES = [
         "worst_regimes": ["Volatile"],
         "tags": ["core", "mean_reversion", "bands"],
     },
+    {
+        "name": "VEB",
+        "display_name": "Volatility-Expansion Breakout",
+        "description": "Direction-agnostic range breakout under VIX expansion: ATR-expanded, volume-confirmed candles breaking the 45-min range. Shadow incubation for Volatile/Bear coverage.",
+        "is_enabled": True,
+        "direction": "BOTH",
+        "timeframe": "5min",
+        "best_regimes": ["Volatile", "Bear"],
+        "worst_regimes": ["Sideways"],
+        "tags": ["advanced", "breakout", "volatility"],
+    },
 ]
 
 
